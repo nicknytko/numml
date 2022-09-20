@@ -33,18 +33,65 @@ class coo_to_csr(torch.autograd.Function):
         return data[argsort_inv], None, None, None
 
 
-class csr_spmv(torch.autograd.Function):
+# class csr_spmv(torch.autograd.Function):
+#     @staticmethod
+#     def forward(ctx, data, col_ind, rowptr, shape, x):
+#         y = torch.zeros(shape[0], dtype=x.dtype)
+#         for row_i in range(len(rowptr) - 1):
+#             for col_j in range(rowptr[row_i], rowptr[row_i + 1]):
+#                 y[row_i] += data[col_j] * x[col_ind[col_j]]
+#         return y
+
+#     @staticmethod
+#     def backward(ctx, data, col_ind, rowptr):
+#         return None, None, None, None, None
+
+
+class spgemv(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, data, col_ind, rowptr, shape, x):
-        y = torch.zeros(shape[0], dtype=x.dtype)
-        for row_i in range(len(rowptr) - 1):
-            for col_j in range(rowptr[row_i], rowptr[row_i + 1]):
-                y[row_i] += data[col_j] * x[col_ind[col_j]]
-        return y
+    def forward(ctx, A_shape, alpha, A_data, A_col_ind, A_rowptr, x, beta, y):
+        Ax = torch.zeros(A_shape[0], dtype=x.dtype)
+        for row_i in range(len(A_rowptr) - 1):
+            for col_j in range(A_rowptr[row_i], A_rowptr[row_i + 1]):
+                Ax[row_i] += A_data[col_j] * x[A_col_ind[col_j]]
+        z = alpha * Ax + beta * y
+
+        ctx.save_for_backward(Ax, x, y, A_data, A_col_ind, A_rowptr)
+        ctx.shape = A_shape
+        ctx.alpha = alpha
+        ctx.beta = beta
+
+        return z
 
     @staticmethod
-    def backward(ctx, data, col_ind, rowptr):
-        return None, None, None, None, None
+    def backward(ctx, df_dz):
+        Ax, x, y, A_data, A_col_ind, A_rowptr = ctx.saved_tensors
+        A_shape = ctx.shape
+        alpha = ctx.alpha
+        beta = ctx.beta
+
+        # A_data
+        d_A_data = torch.clone(A_data)
+        for row in range(len(A_rowptr) - 1):
+            for i in range(A_rowptr[row], A_rowptr[row+1]):
+                col = A_col_ind[i]
+                d_A_data[i] = alpha * df_dz[row] * x[col]
+
+        # df_dx
+        df_dx = torch.zeros_like(x)
+        for row in range(len(A_rowptr) - 1):
+            for i in range(A_rowptr[row], A_rowptr[row+1]):
+                col = A_col_ind[i]
+                df_dx[col] += df_dz[row] * A_data[i] * alpha
+
+        return (None, # A_shape
+                torch.sum(df_dz * Ax), # alpha
+                d_A_data, # A_data
+                None, # A_col_ind
+                None, # A_rowptr
+                df_dx, # x
+                torch.sum(df_dz * y), # beta
+                df_dz * beta) # y
 
 
 class SparseCSRTensor(object):
@@ -63,7 +110,7 @@ class SparseCSRTensor(object):
                 raise RuntimeError('not implemented: csr from dense')
 
     def spmv(self, x):
-        return csr_spmv.apply(self.data, self.indices, self.indptr, self.shape, x)
+        return spgemv.apply(self.shape, torch.tensor(1.), self.data, self.indices, self.indptr, x, torch.tensor(0.), torch.zeros(self.shape[0]))
 
     def __matmul__(self, x):
         dims = len(torch.squeeze(x).shape)
