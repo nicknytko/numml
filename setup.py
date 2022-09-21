@@ -22,5 +22,5 @@ setup(name='numml',
       },
       author='Nicolas Nytko',
       author_email='nnytko2@illinois.edu',
-      packages=['numml', 'numml.torch']
+      packages=['numml']
 )

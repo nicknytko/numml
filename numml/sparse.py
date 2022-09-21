@@ -3,6 +3,7 @@ import torch.autograd
 import numml_torch_cpp
 import numpy as np
 
+
 class coo_to_csr(torch.autograd.Function):
     @staticmethod
     def forward(ctx, values, row_ind, col_ind, shape):
@@ -10,19 +11,26 @@ class coo_to_csr(torch.autograd.Function):
         dtype = data.dtype
         N = len(row_ind)
 
+        # Sort COO representation by rows, then columns.  We save the inverse of the
+        # sort so that we can propagate gradients.
         argsort = torch.Tensor(np.lexsort((col_ind, row_ind))).long()
         argsort_inv = torch.empty(N, dtype=torch.long)
         argsort_inv[argsort] = torch.arange(N)
 
-        # create row indices
+        # create rowpointer indices as cumulative sum of nonzeros in each row
         rowsort = row_ind[argsort]
         rowptr = torch.zeros(shape[0] + 1, dtype=dtype)
-        cur_row = -1
+
+        nnz_per_row = torch.zeros(shape[0])
         for i in range(N):
-            if cur_row != row_ind[i]:
-                cur_row = row_ind[i]
-                rowptr[cur_row] = i
-        rowptr[-1] = len(data)
+            nnz_per_row[row_ind[i]] += 1
+
+        nnz = len(row_ind)
+        cumsum = 0
+        for i in range(shape[0]):
+            rowptr[i] = cumsum
+            cumsum += nnz_per_row[i]
+        rowptr[-1] = nnz
 
         ctx.save_for_backward(argsort_inv, row_ind, col_ind)
         return data, col_ind[argsort], rowptr.long()
@@ -151,7 +159,7 @@ class TriSolveSub(torch.autograd.Function):
     '''
     Atomic torch function for computing the vector operation
 
-    x_i = x_i - \alpha x_j
+    x_i = x_i - \\alpha x_j
 
     Used for the element-wise substitution in triangular solves.
     '''
@@ -239,7 +247,7 @@ def sstrsv(upper, unit, A_shape, A_data, A_col_ind, A_rowptr, b):
 class splincomb(torch.autograd.Function):
     '''
     Computes the linear combination of two sparse matrices like
-    C = \alpha A + \beta B.
+    C = \\alpha A + \\beta B.
     '''
 
     @staticmethod
@@ -251,12 +259,81 @@ class splincomb(torch.autograd.Function):
         C_col_ind = []
         C_rowptr = []
 
+        rows, cols = shape
+
+        for row in range(rows):
+            C_rowptr.append(len(C_data))
+
+            i_A = A_rowptr[row]
+            i_B = B_rowptr[row]
+
+            end_A = A_rowptr[row + 1]
+            end_B = B_rowptr[row + 1]
+
+            # Merge row of A and B
+            while i_A < end_A and i_B < end_B:
+                col_A = A_col_ind[i_A]
+                col_B = B_col_ind[i_B]
+
+                if col_A < col_B:
+                    C_data.append(alpha * A_data[i_A])
+                    C_col_ind.append(col_A)
+                    i_A += 1
+                elif col_A > col_B:
+                    C_data.append(beta * B_data[i_B])
+                    C_col_ind.append(col_B)
+                    i_B += 1
+                else: # col_A == col_B
+                    C_data.append(alpha * A_data[i_A] + beta * B_data[i_B])
+                    C_col_ind.append(col_A)
+                    i_A += 1
+                    i_B += 1
+
+            # Exhausted shared indices, now add rest of row of A/B
+            while i_A < end_A:
+                C_data.append(alpha * A_data[i_A])
+                C_col_ind.append(A_col_ind[i_A])
+                i_A += 1
+            while i_B < end_B:
+                C_data.append(beta * B_data[i_B])
+                C_col_ind.append(B_col_ind[i_B])
+                i_B += 1
+
+        C_rowptr.append(len(C_data))
+
+        return (torch.Tensor(C_data),
+                torch.Tensor(C_col_ind).long(),
+                torch.Tensor(C_rowptr).long())
+
+
     @staticmethod
     def backward(ctx, df_dz):
+        ## TODO: implement this
+
         return (None, # C_data
                 None, # C_col_ind
                 None) # C_rowptr
 
+
+def eye(N, k=0):
+    assert(abs(k) < N)
+
+    N_k = N - abs(k)
+    rows = None
+    cols = None
+    vals = torch.ones(N_k)
+
+    if k == 0:
+        rows = torch.arange(N)
+        cols = torch.arange(N)
+    elif k > 0:
+        rows = torch.arange(N_k)
+        cols = torch.arange(k, N)
+    else:
+        rows = torch.arange(abs(k), N)
+        cols = torch.arange(N_k)
+
+    return SparseCSRTensor((vals, (rows, cols)), shape=(N, N))
 
 class SparseCSRTensor(object):
     def __init__(self, arg1, shape=None):
@@ -279,6 +356,20 @@ class SparseCSRTensor(object):
                 self.shape = shape
             else:
                 self.shape = arg1.shape
+        elif isinstance(arg1, tuple):
+            if len(arg1) == 3:
+                # Input is CSR: (data, indices, indptr)
+                assert(shape is not None)
+
+                self.data, self.indices, self.indptr = arg1
+                self.shape = shape
+            elif len(arg1) == 2:
+                # Input is COO: (data, (row_ind, col_ind))
+                assert(shape is not None)
+
+                data, (rows, cols) = arg1
+                self.data, self.indices, self.indptr = coo_to_csr.apply(data, rows, cols, shape)
+                self.shape = shape
         else:
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
 
@@ -306,3 +397,50 @@ class SparseCSRTensor(object):
 
     def sum(self):
         return self.vals.sum()
+
+    def __add__(self, othr):
+        assert(self.shape == othr.shape)
+
+        C = splincomb.apply(self.shape,
+                            1., self.data, self.indices, self.indptr,
+                            1., othr.data, othr.indices, othr.indptr)
+        return SparseCSRTensor(C, self.shape)
+
+    def __sub__(self, othr):
+        assert(self.shape == othr.shape)
+
+        C = splincomb.apply(self.shape,
+                            1. , self.data, self.indices, self.indptr,
+                            -1., othr.data, othr.indices, othr.indptr)
+        return SparseCSRTensor(C, self.shape)
+
+    def __mul__(self, other):
+        if (isinstance(other, float) or
+            isinstance(other, int) or
+            (isinstance(other, torch.Tensor) and len(other.shape) == 0)):
+            return SparseCSRTensor((self.data * other, self.indices, self.indptr), shape=self.shape)
+        elif isinstance(other, torch.Tensor) and len(torch.squeeze(other).shape) == 2:
+            raise RuntimeError('Element-wise hadamard product not implemented')
+        else:
+            raise RuntimeError(f'Unknown type for multiplication: {type(other)}.')
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __neg__(self):
+        return SparseCSRTensor((-self.data, self.indices, self.indptr), shape=self.shape)
+
+    def __repr__(self):
+        return f"<{self.shape[0]}x{self.shape[1]} sparse matrix tensor of type '{self.data.dtype}'\n\twith {len(self.data)} stored elements in Compressed Sparse Row format>"
+
+    @property
+    def requires_grad(self):
+        return self.data.requires_grad
+
+    @requires_grad.setter
+    def requires_grad(self, b):
+        self.data.requires_grad = b
+
+    @property
+    def grad(self):
+        return SparseCSRTensor((self.data.grad, self.indices, self.indptr), shape=self.shape)
