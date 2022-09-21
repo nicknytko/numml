@@ -13,10 +13,14 @@ def find_cpp_files(directory):
     return out
 
 setup(name='numml',
-    ext_modules=[
-        cpp_extension.CppExtension('numml_torch_cpp', find_cpp_files('cpp')),
-    ],
-    cmdclass={
-        'build_ext': cpp_extension.BuildExtension
-    }
+      version='0.0.1',
+      ext_modules=[
+          cpp_extension.CppExtension('numml_torch_cpp', find_cpp_files('cpp')),
+      ],
+      cmdclass={
+          'build_ext': cpp_extension.BuildExtension
+      },
+      author='Nicolas Nytko',
+      author_email='nnytko2@illinois.edu',
+      packages=['numml', 'numml.torch']
 )
