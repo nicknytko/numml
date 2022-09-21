@@ -236,6 +236,28 @@ def sstrsv(upper, unit, A_shape, A_data, A_col_ind, A_rowptr, b):
     return x
 
 
+class splincomb(torch.autograd.Function):
+    '''
+    Computes the linear combination of two sparse matrices like
+    C = \alpha A + \beta B.
+    '''
+
+    @staticmethod
+    def forward(ctx, shape,
+                alpha, A_data, A_col_ind, A_rowptr,
+                beta,  B_data, B_col_ind, B_rowptr):
+
+        C_data = []
+        C_col_ind = []
+        C_rowptr = []
+
+    @staticmethod
+    def backward(ctx, df_dz):
+        return (None, # C_data
+                None, # C_col_ind
+                None) # C_rowptr
+
+
 class SparseCSRTensor(object):
     def __init__(self, arg1, shape=None):
         if isinstance(arg1, torch.Tensor):
