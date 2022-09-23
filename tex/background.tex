@@ -1,0 +1,199 @@
+\documentclass{article}
+
+\usepackage{lipsum}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{graphicx}
+\usepackage{epstopdf}
+\ifpdf%
+\DeclareGraphicsExtensions{.eps,.pdf,.png,.jpg}
+\else
+\DeclareGraphicsExtensions{.eps}
+\fi
+\usepackage{amsopn}
+\DeclareMathOperator{\diag}{diag}
+\usepackage{booktabs}
+\usepackage{bbm}
+\usepackage{bm}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{placeins}
+\usepackage{cleveref}
+\usepackage{listings}
+
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+\newcommand{\normtwo}[1]{\left\lVert#1\right\rVert_2}
+\newcommand{\abs}[1]{\left\lvert#1\right\rvert}
+\newcommand{\mat}[1]{\bm{{#1}}}
+\renewcommand{\vec}[1]{\bm{{#1}}}
+\newcommand{\tensor}[1]{\bm{{\mathcal{#1}}}}
+\newcommand{\lequiv}{\Leftrightarrow}
+\newcommand{\bigO}[1]{\mathcal{O}\!\left(#1\right)}
+\newcommand{\ceil}[1]{\left\lceil #1 \right\rceil}
+\newcommand{\floor}[1]{\left\lfloor #1 \right\rfloor}
+\newcommand{\sfrac}[2]{#1/#2}
+\newcommand{\hquad}{\enskip}
+\newcommand{\expected}[1]{\mathbb{E}\left[#1\right]}
+\newcommand{\mspan}[1]{\text{span}\left( #1 \right)}
+\newcommand{\prob}[1]{P\left(#1\right)}
+\newcommand{\probt}[1]{P\left( \text{#1} \right)}
+\newcommand{\condprob}[2]{P\left(#1 \:|\: #2\right)}
+\newcommand{\condprobt}[2]{P\left(\text{#1} \:|\: \text{#2}\right)}
+\newcommand{\bayes}[2]{\frac{\condprob{#2}{#1}\prob{#1}}{\prob{#2}}}
+\newcommand{\bayesx}[3]{\frac{\condprob{#2}{#1}\prob{#1}}{\condprob{#2}{#1}\prob{#1} + \condprob{#2}{#3}\prob{#3}}}
+\newcommand{\sech}{\text{sech}}
+\newcommand*{\vertbar}{\rule[-1ex]{0.5pt}{2.5ex}}
+\newcommand*{\horzbar}{\rule[.5ex]{2.5ex}{0.5pt}}
+\newcommand{\vect}[2]{\underline{{#1}}_{{#2}}}
+\newcommand{\basisp}[1]{\underline{{p}}_{{#1}}}
+\newcommand{\basisq}[1]{\underline{{q}}_{{#1}}}
+\newcommand{\coeff}[1]{\underline{{a}}_{{#1}}}
+\newcommand{\bestfit}{\underline{\bar{x}}}
+\newcommand{\grad}{\nabla}
+\newcommand{\laplace}{\Delta}
+\newcommand{\setbar}{\:\middle|\:}
+\renewcommand{\div}{\grad \cdot}
+\renewcommand{\Re}{\text{Re}}
+\newcommand{\var}[1]{\texttt{{#1}}}
+\newcommand{\mask}[1]{\text{mask}\left( {#1} \right)}
+\newcommand{\gradfn}[2]{\nabla_{{#1}}\left({#2}\right)}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{corollary}{Corollary}[theorem]
+\newtheorem{lemma}[theorem]{Lemma}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[section]
+
+\begin{document}
+\section{Background and Notation}
+Unless otherwise noted, let $\mat{A} \in \mathbb{R}^{n \times n}; \vec{b}, \vec{x} \in \mathbb{R}^n$ be the variables in the (sparse) system of linear equations
+\begin{equation}
+  \mat{A}\vec{x} = \vec{b}. \label{eqn:Ax=b}
+\end{equation}
+For iterative solvers, denote $\vec{x}_k$, $k \geq 0$ to be the approximate solution to \cref{eqn:Ax=b} at iteration $k$, along with residual $\vec{r}_k = \vec{b} - \mat{A}\vec{x}_k$, and error $\vec{e}_k = \vec{x} - \vec{x}_k$.
+
+For some sparse matrix $\mat{M}$, let $\mask{\mat{M}}$ denote the \textit{sparsity mask} of $\mat{M}$ like
+\begin{equation}
+  \left[\mask{\mat{M}}\right]_{ij} = \begin{cases}
+    1 & m_{ij} \neq 0 \\
+    0 & \text{otherwise}
+    \end{cases}.
+\end{equation}
+In other words, this has the identity $\mat{M} \odot \mask{\mat{M}} = \mat{M}$.
+
+\subsection{Chain Rule}
+For background, we begin with a refresher on the multivariate chain rule\cite{Johnson_notes},
+\begin{theorem}
+  Given some function $f : \mathbb{R}^{N_x} \to \mathbb{R}$ and $\vec{t} \in \mathbb{R}^{N_t}, \vec{x}\left(\vec{t}\right) \in \mathbb{R}^{N_x}$, the partial derivative $\frac{\partial z}{\partial t_i}$ for $z=f(\vec{x}\left(\vec{t}\right))$ is given by
+  \begin{equation}
+    \frac{\partial z}{\partial t_i} = \sum_{j=1}^{N_x} \frac{\partial f}{\partial x_j} \frac{\partial x_j}{\partial t_i}. \label{eqn:chainrule}
+  \end{equation}
+  \label{thm:chainrule}
+\end{theorem}
+
+For the general case, we can extend \cref{thm:chainrule} for arbitrary tensor-valued functions, by tensors we mean $n$-dimensional arrays for nonnegative integer $n$.  For a more extensive treatment on tensor computations and the notation used, see \cite{tensors}.
+
+\begin{corollary}
+  Letting $I_1, I_2, \ldots I_N$ denote the indices of an $N$-dimensional tensor, given a function $f : \mathbb{R}^{I_1 \times I_2 \times \cdots \times I_{N_X}} \to \mathbb{R}$, and $\tensor{T}\in \mathbb{R}^{J_1 \times J_2 \times \cdots \times J_{N_T}}, \tensor{X}\left(\tensor{T}\right) \in \mathbb{R}^{I_1 \times I_2 \times \cdots \times I_{N_X}}$, the partial derivative $\frac{\partial z}{\partial t_{i_1,i_2,\ldots,i_N}}$ for $z=f\left(\tensor{X}\left(\tensor{T}\right)\right)$ is given by
+  \begin{equation}
+    \frac{\partial z}{\partial t_{j_1,j_2,\ldots,j_{N_T}}} = \sum_{i_1=1}^{I_1} \sum_{i_2=1}^{I_2} \cdots \sum_{i_{N_X}=1}^{I_{N_X}} \frac{\partial z}{\partial x_{i_1, i_2, \ldots, i_{N_X}}} \frac{\partial x_{i_1, i_2, \ldots, i_{N_X}}}{\partial t_{j_1, j_2, \ldots, j_{N_T}}}. \label{eqn:tensorchainrule}
+  \end{equation}
+  \begin{proof} (handwavey): This result comes directly from \cref{thm:chainrule}. Let $\vec{t}, \vec{x}\left(\vec{t}\right)$ be arbitrary (consistent) flattenings of tensors $\tensor{T}$ and $\tensor{X}$ into column vectors.  Use these $\vec{t}$ and $\vec{x}\left(\vec{t}\right)$ directly in \cref{eqn:chainrule} and de-flatten outputs to obtain the summations.  Reshaping tensors does not affect gradient propagation, as it is just a re-ordering of elements. \end{proof}
+  \label{cor:tensorchainrule}
+\end{corollary}
+
+\begin{definition}
+  In \cref{cor:tensorchainrule}, denote the term being right-multiplied in the summation as the \textit{generalized gradient}, which we will define like
+  \begin{equation}
+    \left[\gradfn{\tensor{X}}{z}\right]_{i_1,i_2,\ldots,i_{N_X}} = \frac{\partial z}{\partial x_{i_1,i_2,\ldots,i_{N_X}}}. \label{eqn:gradfn}
+  \end{equation}
+  This is to be read like ``the gradient of $z$ with respect to $\tensor{X}$.''  This value will have the same shape as $\tensor{X}$ itself.
+\end{definition}
+
+\begin{definition}
+  Furthermore, in \cref{cor:tensorchainrule}, we will refer to the term being left-multiplied in the summation as the \textit{generalized Jacobian}, defined like
+  \begin{equation}
+    \left[J_{\tensor{X}\left(\tensor{T}\right)}\right]_{\left(i_1, i_2, \ldots, i_{N_X}\right), \left(j_1, j_2, \ldots, j_{N_T}\right)} = \frac{\partial x_{i_1, i_2, \ldots, i_{N_X}}}{\partial t_{j_1, j_2, \ldots, j_{N_T}}}. \label{eqn:jacfn}
+  \end{equation}
+  From this, we have that \cref{eqn:tensorchainrule} can be alternatively denoted as the tensor contraction of $\gradfn{\tensor{X}}{z}J_{\tensor{X}\left(\tensor{T}\right)}$ over the indices $i_1, i_2, \ldots, i_{N_X}$.
+\end{definition}
+
+\subsection{Computation Graph}
+General familiarity with the concept of a computation graph\cite{pytorch,BaydinPR15} will be assumed.  In an automatic differentiation environment, running some set of computations in \textit{forward mode} creates a DAG that encodes the order in which functions are composed with one another.  After the forward pass is complete, one can start from a scalar \textit{leaf} in the graph and traverse backwards in a \textit{reverse mode} to generate gradient information for each node with respect to the leaf.
+
+At each node when we are performing the backwards propagation, we are computing the equivalent of \cref{eqn:tensorchainrule} on each node with respect to that node's output edges.  The implementation of this is described in the follow example code snippet.
+
+\lstinputlisting[language=Python]{example_autograd_fn.py}
+
+For some tensor $\tensor{X} \in \mathbb{R}^{I_1 \times I_2 \times \cdots \times I_{N_X}}$, this trivially computes $\tensor{Y}=2\tensor{X}$.  This gives the generalized Jacobian
+\begin{equation}
+  \left[J_{\tensor{Y}\left(\tensor{X}\right)}\right]_{\left(i_1, i_2, \ldots, i_{N_X}\right), \left(i_1, i_2, \ldots, i_{N_X}\right)} = 2,
+\end{equation}
+which is $0$ at every other index.  When doing the backward pass (and assuming $\tensor{Y}$ is further given to some function that eventually outputs a scalar $z$), the gradient return value is given by
+\begin{equation}
+ \gradfn{\tensor{X}}{z} J_{\tensor{Y}\left(\tensor{X}\right)} = 2\gradfn{\tensor{X}}{z},
+\end{equation}
+showing that while the generalized Jacobian is a notational convenience, it is often unnecessary and indeed can be expensive in memory usage to actually form in practice.  Instead, for functions like these we are interested in computing \textit{the action} of multiplying the gradient by the Jacobian.
+
+\section{Gradient Derivations}
+\subsection{GEMV}
+This is implementing the basic linear algebra operation
+\begin{equation}
+  \vec{w} = \alpha \mat{A}\vec{x} + \beta \vec{y},
+\end{equation}
+for $\mat{A} \in \mathbb{R}^{n \times m}, \vec{x} \in \mathbb{R}^m; \vec{y}, \vec{z} \in \mathbb{R}^n; \alpha, \beta \in \mathbb{R}$.  This has the component-wise forward pass of
+\begin{equation}
+  w_i = \alpha\left(\sum_k a_{i,k} x_k\right) + \beta y_i.
+\end{equation}
+
+Taking partial derivatives gives
+\begin{align}
+  \frac{\partial z_i}{\partial a_{i,j}} &= \alpha x_j, \\
+  \frac{\partial z_i}{\partial x_j} &= \alpha a_{i, j} \\
+  \frac{\partial z_i}{\partial \alpha} &= \sum_k a_{i,k} x_k, \\
+  \frac{\partial z_i}{\partial y_i} &= \beta, \\
+  \frac{\partial z_i}{\partial \beta} &= y_i.
+\end{align}
+
+Applying the chain rule to some function $f : \mathbb{R}^n \to \mathbb{R}$ like $z=f\left(\vec{w}\right)$ results in the update rules
+\begin{align}
+  \frac{\partial z}{\partial a_{ij}} &= \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial a_{i,j}} = \alpha \frac{\partial z}{\partial w_i} x_j, \\
+  \frac{\partial z}{\partial x_j} &= \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial x_j} = \alpha \sum_k \frac{\partial z}{\partial w_k} a_{k, j} = \alpha \grad_{\vec{w}}\left(z\right) \mat{A} \\
+  \frac{\partial z}{\partial \alpha} &= \sum_k \frac{\partial z}{\partial w_j} \frac{\partial w_j}{\partial \alpha} = \sum_j \frac{\partial z}{\partial w_j} \sum_k a_{jk} x_k, \\
+  \frac{\partial z}{\partial y_i} &= \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial y_i} = \beta \frac{\partial z}{\partial w_i}, \\
+  \frac{\partial z}{\partial \beta} &= \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial \beta} = \sum_k \frac{\partial z}{\partial w_k} y_k.
+\end{align}
+
+\subsection{SPGEMM}
+This will go through the derivation of the sparse matrix-matrix product defined by
+\begin{equation}
+  \mat{C} = \mat{A}\mat{B},
+\end{equation}
+where $\mat{A} \in \mathbb{R}^{m \times n}, \mat{B} \in \mathbb{R}^{n \times o}, \mat{C} \in \mathbb{R}^{m \times o}$.
+
+The forward pass is trivially defined (entrywise) like
+\begin{equation}
+  c_{ij} = \sum_k^n a_{ik} b_{kj},
+\end{equation}
+which emits the partial derivatives
+\begin{align}
+  \frac{\partial c_{ij}}{\partial a_{ik}} &= b_{kj}, \\
+  \frac{\partial c_{ij}}{\partial b_{kj}} &= a_{ik}.
+\end{align}
+Applying the chain rule to some function $f : \mathbb{R}^{m \times o} \to \mathbb{R}$ like $z=f\left(\mat{C}\right)$ results in the update rules
+\begin{align}
+  \frac{\partial f}{\partial a_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial a_{ij}} = \sum_{l=1}^o \frac{\partial z}{\partial c_{il}} b_{jl} &\implies \frac{\partial f}{\partial \mat{A}} = \left(\gradfn{\mat{C}}{z} \mat{B}^T\right) \odot \mask{\mat{A}}, \\
+  \frac{\partial f}{\partial b_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial b_{ij}} = \sum_{k=1}^m \frac{\partial z}{\partial c_{kj}} a_{ki} &\implies \frac{\partial f}{\partial \mat{B}} = \left(\mat{A}^T \gradfn{\mat{C}}{z}\right) \odot \mask{\mat{B}}.
+\end{align}
+
+\bibliographystyle{siam}
+\bibliography{background}
+\end{document}
