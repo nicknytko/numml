@@ -528,6 +528,24 @@ def eye(N, k=0):
 
     return SparseCSRTensor((vals, (rows, cols)), shape=(N, N))
 
+def diag(x, k=0):
+    N_k = len(x)
+    N = N_k + abs(k)
+    rows = None
+    cols = None
+
+    if k == 0:
+        rows = torch.arange(N)
+        cols = torch.arange(N)
+    elif k > 0:
+        rows = torch.arange(N_k)
+        cols = torch.arange(k, N)
+    else:
+        rows = torch.arange(abs(k), N)
+        cols = torch.arange(N_k)
+
+    return SparseCSRTensor((x, (rows, cols)), shape=(N, N))
+
 class SparseCSRTensor(object):
     def __init__(self, arg1, shape=None):
         if isinstance(arg1, torch.Tensor):
@@ -637,8 +655,19 @@ class SparseCSRTensor(object):
     def __rmul__(self, other):
         return self.__mul__(other)
 
+    def __rtruediv__(self, other):
+        if (isinstance(other, float) or
+            isinstance(other, int) or
+            (isinstance(other, torch.Tensor) and len(other.shape) == 0)):
+            return SparseCSRTensor((other / self.data, self.indices, self.indptr), shape=self.shape)
+        else:
+            raise RuntimeError(f'Unknown type for right-division: {type(other)}.')
+
     def __neg__(self):
         return SparseCSRTensor((-self.data, self.indices, self.indptr), shape=self.shape)
+
+    def __pow__(self, p):
+        return SparseCSRTensor((self.data ** p, self.indices, self.indptr), shape=self.shape)
 
     def __repr__(self):
         grad_str = ''
@@ -675,3 +704,46 @@ class SparseCSRTensor(object):
         Number of stored values, including explicit zeros
         '''
         return len(self.data)
+
+    @property
+    def diagonal_idx(self):
+        '''
+        Returns the indices of the diagonal entries of the matrix such that
+        idx[i] gives the diagonal index of the i'th row
+        '''
+
+        idx = torch.ones(min(self.shape[0], self.shape[1])).long() * -1
+
+        for row in range(min(self.shape[0], self.shape[1])):
+            for i in range(self.indptr[row], self.indptr[row+1]):
+                col = self.indices[i].item()
+                if row == col:
+                    idx[row] = i
+
+        return idx
+
+    @property
+    def row_indices(self):
+        '''
+        Returns the row number of each nonzero entry
+        '''
+
+        idx = torch.zeros(self.nnz).long()
+
+        for row in range(self.shape[0]):
+            for i in range(self.indptr[row], self.indptr[row+1]):
+                idx[i] = row
+
+        return idx
+
+    def diagonal(self, k=0):
+        max_diag = min(self.shape[0], self.shape[1])
+        D = torch.zeros(max_diag - abs(k))
+
+        for row in range(max_diag):
+            for i in range(self.indptr[row], self.indptr[row+1]):
+                col = self.indices[i].item()
+                if row == col:
+                    D[row] = self.data[i]
+
+        return D
