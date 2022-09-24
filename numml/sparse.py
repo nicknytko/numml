@@ -92,6 +92,143 @@ class spgemv(torch.autograd.Function):
                 df_dz * beta) # y
 
 
+class spgemm(torch.autograd.Function):
+    '''
+    General sparse matrix times sparse matrix product
+    '''
+
+    @staticmethod
+    def forward(ctx,
+                A_shape, A_data, A_indices, A_indptr,
+                B_shape, B_data, B_indices, B_indptr):
+
+        assert(A_shape[1] == B_shape[0])
+        C_shape = (A_shape[0], B_shape[1])
+
+        # Start with a sparse dict representation of C
+        C_dict = [None] * C_shape[0]
+        C_nnz = 0
+
+        # Do the matrix product by partial sums over each entry of A and rows of B
+        for A_row in range(A_shape[0]):
+            for A_i in range(A_indptr[A_row], A_indptr[A_row+1]):
+                A_col = (A_indices[A_i]).item()
+                for B_i in range(B_indptr[A_col], B_indptr[A_col+1]):
+                    B_col = (B_indices[B_i]).item()
+
+                    i, j = A_row, B_col
+                    if C_dict[i] is None:
+                        C_dict[i] = {}
+                    if not j in C_dict[i]:
+                        C_dict[i][j] = 0.
+                        C_nnz += 1
+                    C_dict[i][j] = C_dict[i][j] + A_data[A_i].item() * B_data[B_i].item()
+
+        # Convert to CSR repr
+        C_data = torch.zeros(C_nnz, dtype=A_data.dtype)
+        C_indices = torch.zeros(C_nnz).long()
+        C_indptr = torch.zeros(C_shape[0] + 1).long()
+
+        # print('nnz', C_nnz)
+        # print('C_dict', C_dict)
+
+        C_i = 0
+        for C_row in range(C_shape[0]):
+            C_indptr[C_row] = C_i
+
+            colval = sorted(C_dict[C_row].items(), key=lambda tup: tup[0])
+            for C_col, val in colval:
+                # print(f'C[{C_row}, {C_col}] = C_data[{C_i}] = {val}')
+                C_data[C_i] = val
+                C_indices[C_i] = C_col
+                C_i += 1
+        C_indptr[-1] = C_nnz
+
+        ctx.save_for_backward(A_data, A_indices, A_indptr, B_data, B_indices, B_indptr, C_data, C_indices, C_indptr)
+        ctx.A_shape = A_shape
+        ctx.B_shape = B_shape
+        ctx.C_shape = C_shape
+
+        return (C_shape, C_data, C_indices, C_indptr)
+
+
+    @staticmethod
+    def backward(ctx, _grad_C_shape, grad_C_data, _grad_C_indices, _grad_C_indptr):
+        A_data, A_indices, A_indptr, B_data, B_indices, B_indptr, C_data, C_indices, C_indptr = ctx.saved_tensors
+        A_shape = ctx.A_shape
+        B_shape = ctx.B_shape
+        C_shape = ctx.C_shape
+
+        ## dA = (grad_C * B^T) (*) mask(A)
+        grad_A = torch.zeros_like(A_data)
+        A_mask = {}
+
+        # first, build i,j -> A_data idx mapping
+        for A_row in range(A_shape[0]):
+            A_mask[A_row] = {}
+            for A_i in range(A_indptr[A_row], A_indptr[A_row+1]):
+                A_mask[A_row][A_indices[A_i].item()] = A_i
+
+        # now, compute grad_C * B^T
+        for C_row in range(len(C_indptr)-1):
+            for B_row in range(len(B_indptr)-1):
+                if B_row not in A_mask[C_row]: # skip this entry because of mask
+                    continue
+
+                C_row_i = (C_indptr[C_row]).item()
+                B_row_i = (B_indptr[B_row]).item()
+
+                C_row_end = (C_indptr[C_row + 1]).item()
+                B_row_end = (B_indptr[B_row + 1]).item()
+
+                aij = 0.
+
+                while C_row_i < C_row_end and B_row_i < B_row_end:
+                    C_col = C_indices[C_row_i]
+                    B_col = B_indices[B_row_i]
+
+                    if C_col < B_col:
+                        C_row_i += 1
+                    elif C_col > B_col:
+                        B_row_i += 1
+                    else:
+                        aij += grad_C_data[C_row_i] * B_data[B_row_i]
+                        C_row_i += 1
+                        B_row_i += 1
+
+                grad_A[A_mask[C_row][B_row]] = aij
+
+        ## dB = (A^T * grad_C) (*) mask(B)
+        grad_B = torch.zeros_like(B_data)
+
+        # build index map
+        B_mask = {}
+        for B_row in range(B_shape[0]):
+            B_mask[B_row] = {}
+            for B_i in range(B_indptr[B_row], B_indptr[B_row+1]):
+                B_mask[B_row][B_indices[B_i].item()] = B_i
+
+        # compute A^T grad_C
+        for A_row in range(len(A_indptr)-1):
+            for A_row_i in range(A_indptr[A_row], A_indptr[A_row+1]):
+                A_col = A_indices[A_row_i].item()
+                for C_row_i in range(C_indptr[A_row], C_indptr[A_row+1]):
+                    C_col = C_indices[C_row_i].item()
+                    if C_col not in B_mask[A_col]:
+                        continue # skip this entry because of mask
+
+                    grad_B[B_mask[A_col][C_col]] += A_data[A_row_i] * grad_C_data[C_row_i]
+
+        return (None, # A_shape
+                grad_A,
+                None, # A_indices
+                None, # A_indptr
+                None, # B_shape
+                grad_B,
+                None, # B_indices
+                None) # B_indptr
+
+
 class ScaleVecPrimitive(torch.autograd.Function):
     '''
     Atomic torch function for scaling a specific entry of a vector, while keeping
@@ -305,7 +442,7 @@ class splincomb(torch.autograd.Function):
         C_col_ind = torch.Tensor(C_col_ind).long()
         C_rowptr = torch.Tensor(C_rowptr).long()
 
-        ctx.save_for_backward(torch.tensor(alpha), A_data, A_col_ind, A_rowptr, torch.tensor(beta), B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr)
+        ctx.save_for_backward(alpha, A_data, A_col_ind, A_rowptr, beta, B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr)
         ctx.shape = shape
 
         return (C_data, C_col_ind, C_rowptr)
@@ -437,12 +574,24 @@ class SparseCSRTensor(object):
     def solve_triangular(self, upper, unit, b):
         return sstrsv(upper, unit, self.shape, self.data, self.indices, self.indptr, b)
 
+    def spgemm(self, othr):
+        C_shape, C_data, C_indices, C_indptr = spgemm.apply(self.shape, self.data, self.indices, self.indptr,
+                                                            othr.shape, othr.data, othr.indices, othr.indptr)
+        return SparseCSRTensor((C_data, C_indices, C_indptr), C_shape)
+
     def __matmul__(self, x):
-        dims = len(torch.squeeze(x).shape)
+        if isinstance(x, torch.Tensor):
+            dims = len(torch.squeeze(x).shape)
+        elif isinstance(x, SparseCSRTensor):
+            dims = 2
+
         if dims == 1:
             return self.spmv(x)
         elif dims == 2:
-            raise RuntimeError('not implemented: spmm/spspmm')
+            if isinstance(x, SparseCSRTensor):
+                return self.spgemm(x)
+            elif isinstance(x, torch.Tensor):
+                raise RuntimeError('not implemented: sparse times dense matrix product')
         else:
             raise RuntimeError(f'invalid tensor found for sparse multiply: mode {dims} tensor found.')
 
@@ -497,6 +646,12 @@ class SparseCSRTensor(object):
             grad_str = f', grad_fn=<{self.data.grad_fn.__class__.__name__}>'
 
         return f"<{self.shape[0]}x{self.shape[1]} sparse matrix tensor of type '{self.data.dtype}'\n\twith {len(self.data)} stored elements in Compressed Sparse Row format{grad_str}>"
+
+    def clone(self):
+        return SparseCSRTensor((self.data, self.indices, self.indptr), shape=self.shape)
+
+    def copy(self):
+        return self.clone()
 
     @property
     def requires_grad(self):
