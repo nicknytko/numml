@@ -63,7 +63,9 @@
 \renewcommand{\Re}{\text{Re}}
 \newcommand{\var}[1]{\texttt{{#1}}}
 \newcommand{\mask}[1]{\text{mask}\left( {#1} \right)}
-\newcommand{\gradfn}[2]{\nabla_{{#1}}\left({#2}\right)}
+\newcommand{\gradfn}[2]{\nabla_{{#1}}\left({#2}\right)} % grad wrt #1 of #2
+\newcommand{\jac}[2]{J_{{#1}}\left({#2}\right)} % jacobian wrt #1 of #2
+\newcommand{\elemwise}[2]{\left[#1\right]_{{#2}}} % elementwise of #1 indexed at #2
 
 \newtheorem{theorem}{Theorem}[section]
 \newtheorem{corollary}{Corollary}[theorem]
@@ -92,9 +94,9 @@ In other words, this has the identity $\mat{M} \odot \mask{\mat{M}} = \mat{M}$.
 \subsection{Chain Rule}
 For background, we begin with a refresher on the multivariate chain rule\cite{Johnson_notes},
 \begin{theorem}
-  Given some function $f : \mathbb{R}^{N_x} \to \mathbb{R}$ and $\vec{t} \in \mathbb{R}^{N_t}, \vec{x}\left(\vec{t}\right) \in \mathbb{R}^{N_x}$, the partial derivative $\frac{\partial z}{\partial t_i}$ for $z=f(\vec{x}\left(\vec{t}\right))$ is given by
+  Given some function $f : \mathbb{R}^{n_x} \to \mathbb{R}$ and $\vec{t} \in \mathbb{R}^{n_t}, \vec{x}\left(\vec{t}\right) \in \mathbb{R}^{n_x}$, the partial derivative $\frac{\partial z}{\partial t_i}$ for $z=f(\vec{x}\left(\vec{t}\right))$ is given by
   \begin{equation}
-    \frac{\partial z}{\partial t_i} = \sum_{j=1}^{N_x} \frac{\partial f}{\partial x_j} \frac{\partial x_j}{\partial t_i}. \label{eqn:chainrule}
+    \frac{\partial z}{\partial t_i} = \sum_{j=1}^{n_x} \frac{\partial f}{\partial x_j} \frac{\partial x_j}{\partial t_i}. \label{eqn:chainrule}
   \end{equation}
   \label{thm:chainrule}
 \end{theorem}
@@ -102,11 +104,10 @@ For background, we begin with a refresher on the multivariate chain rule\cite{Jo
 For the general case, we can extend \cref{thm:chainrule} for arbitrary tensor-valued functions, by tensors we mean $n$-dimensional arrays for nonnegative integer $n$.  For a more extensive treatment on tensor computations and the notation used, see \cite{tensors}.
 
 \begin{corollary}
-  Letting $I_1, I_2, \ldots I_N$ denote the indices of an $N$-dimensional tensor, given a function $f : \mathbb{R}^{I_1 \times I_2 \times \cdots \times I_{N_X}} \to \mathbb{R}$, and $\tensor{T}\in \mathbb{R}^{J_1 \times J_2 \times \cdots \times J_{N_T}}, \tensor{X}\left(\tensor{T}\right) \in \mathbb{R}^{I_1 \times I_2 \times \cdots \times I_{N_X}}$, the partial derivative $\frac{\partial z}{\partial t_{i_1,i_2,\ldots,i_N}}$ for $z=f\left(\tensor{X}\left(\tensor{T}\right)\right)$ is given by
+  Letting $I_1, I_2, \ldots I_N$ denote the indices of an $N$-dimensional tensor, given a function $f : \mathbb{R}^{I_1 \times I_2 \times \cdots \times I_{N_X}} \to \mathbb{R}$, and $\tensor{T}\in \mathbb{R}^{J_1 \times J_2 \times \cdots \times J_{N_T}}, \tensor{X}\left(\tensor{T}\right) \in \mathbb{R}^{I_1 \times I_2 \times \cdots \times I_{N_X}}$, the partial derivative $\frac{\partial z}{\partial t_{j_1,j_2,\ldots,j_{N_T}}}$ for $z=f\left(\tensor{X}\left(\tensor{T}\right)\right)$ is given by
   \begin{equation}
     \frac{\partial z}{\partial t_{j_1,j_2,\ldots,j_{N_T}}} = \sum_{i_1=1}^{I_1} \sum_{i_2=1}^{I_2} \cdots \sum_{i_{N_X}=1}^{I_{N_X}} \frac{\partial z}{\partial x_{i_1, i_2, \ldots, i_{N_X}}} \frac{\partial x_{i_1, i_2, \ldots, i_{N_X}}}{\partial t_{j_1, j_2, \ldots, j_{N_T}}}. \label{eqn:tensorchainrule}
-  \end{equation}
-  \begin{proof} (handwavey): This result comes directly from \cref{thm:chainrule}. Let $\vec{t}, \vec{x}\left(\vec{t}\right)$ be arbitrary (consistent) flattenings of tensors $\tensor{T}$ and $\tensor{X}$ into column vectors.  Use these $\vec{t}$ and $\vec{x}\left(\vec{t}\right)$ directly in \cref{eqn:chainrule} and de-flatten outputs to obtain the summations.  Reshaping tensors does not affect gradient propagation, as it is just a re-ordering of elements. \end{proof}
+  \end{equation}  \begin{proof} (handwavey): This result comes directly from \cref{thm:chainrule}. Let $\vec{t}, \vec{x}\left(\vec{t}\right)$ be arbitrary (consistent) flattenings of tensors $\tensor{T}$ and $\tensor{X}$ into column vectors.  Use these $\vec{t}$ and $\vec{x}\left(\vec{t}\right)$ directly in \cref{eqn:chainrule} and de-flatten outputs to obtain the summations.  Reshaping tensors does not affect gradient propagation, as it is just a re-ordering of elements. \end{proof}
   \label{cor:tensorchainrule}
 \end{corollary}
 
@@ -121,9 +122,9 @@ For the general case, we can extend \cref{thm:chainrule} for arbitrary tensor-va
 \begin{definition}
   Furthermore, in \cref{cor:tensorchainrule}, we will refer to the term being left-multiplied in the summation as the \textit{generalized Jacobian}, defined like
   \begin{equation}
-    \left[J_{\tensor{X}\left(\tensor{T}\right)}\right]_{\left(i_1, i_2, \ldots, i_{N_X}\right), \left(j_1, j_2, \ldots, j_{N_T}\right)} = \frac{\partial x_{i_1, i_2, \ldots, i_{N_X}}}{\partial t_{j_1, j_2, \ldots, j_{N_T}}}. \label{eqn:jacfn}
+    \left[\jac{\tensor{T}}{\tensor{X}}\right]_{\left(i_1, i_2, \ldots, i_{N_X}\right), \left(j_1, j_2, \ldots, j_{N_T}\right)} = \frac{\partial x_{i_1, i_2, \ldots, i_{N_X}}}{\partial t_{j_1, j_2, \ldots, j_{N_T}}}, \label{eqn:jacfn}
   \end{equation}
-  From this, we have that \cref{eqn:tensorchainrule} can be alternatively denoted as the tensor contraction of $\gradfn{\tensor{X}}{z}J_{\tensor{X}\left(\tensor{T}\right)}$ over the indices $i_1, i_2, \ldots, i_{N_X}$.
+  where the parentheses in the indexing are used only to emphasize that the first $N_X$ indices are used for the input, while the last $N_T$ indices are used for the output. From this, we have that \cref{eqn:tensorchainrule} can be alternatively denoted as the tensor contraction of $\gradfn{\tensor{X}}{z}J_{\tensor{X}\left(\tensor{T}\right)}$ over the indices $i_1, i_2, \ldots, i_{N_X}$.
 \end{definition}
 
 \subsection{Computation Graph}
@@ -135,11 +136,11 @@ At each node when we are performing the backwards propagation, we are computing 
 
 For some tensor $\tensor{X} \in \mathbb{R}^{I_1 \times I_2 \times \cdots \times I_{N_X}}$, this trivially computes $\tensor{Y}=2\tensor{X}$.  This gives the generalized Jacobian
 \begin{equation}
-  \left[J_{\tensor{Y}\left(\tensor{X}\right)}\right]_{\left(i_1, i_2, \ldots, i_{N_X}\right), \left(i_1, i_2, \ldots, i_{N_X}\right)} = 2,
+  \left[\jac{\tensor{X}}{\tensor{Y}}\right]_{\left(i_1, i_2, \ldots, i_{N_X}\right), \left(i_1, i_2, \ldots, i_{N_X}\right)} = 2,
 \end{equation}
 which is $0$ at every other index.  When doing the backward pass (and assuming $\tensor{Y}$ is further given to some function that eventually outputs a scalar $z$), the gradient return value is given by
 \begin{equation}
- \gradfn{\tensor{X}}{z} J_{\tensor{Y}\left(\tensor{X}\right)} = 2\gradfn{\tensor{X}}{z},
+ \gradfn{\tensor{X}}{z} \jac{\tensor{X}}{\tensor{Y}} = 2\gradfn{\tensor{X}}{z},
 \end{equation}
 showing that while the generalized Jacobian is a notational convenience, it is often unnecessary and indeed can be expensive in memory usage to actually form in practice.  Instead, for functions like these we are interested in computing \textit{the action} of multiplying the gradient by the Jacobian.
 
@@ -190,10 +191,29 @@ which emits the partial derivatives
 \end{align}
 Applying the chain rule to some function $f : \mathbb{R}^{m \times o} \to \mathbb{R}$ like $z=f\left(\mat{C}\right)$ results in the update rules
 \begin{align}
-  \frac{\partial f}{\partial a_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial a_{ij}} = \sum_{l=1}^o \frac{\partial z}{\partial c_{il}} b_{jl} &\implies \frac{\partial f}{\partial \mat{A}} = \left(\gradfn{\mat{C}}{z} \mat{B}^T\right) \odot \mask{\mat{A}}, \\
-  \frac{\partial f}{\partial b_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial b_{ij}} = \sum_{k=1}^m \frac{\partial z}{\partial c_{kj}} a_{ki} &\implies \frac{\partial f}{\partial \mat{B}} = \left(\mat{A}^T \gradfn{\mat{C}}{z}\right) \odot \mask{\mat{B}}.
+  \frac{\partial z}{\partial a_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial a_{ij}} = \sum_{l=1}^o \frac{\partial z}{\partial c_{il}} b_{jl} &\implies \frac{\partial z}{\partial \mat{A}} = \left(\gradfn{\mat{C}}{z} \mat{B}^T\right) \odot \mask{\mat{A}}, \\
+  \frac{\partial z}{\partial b_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial b_{ij}} = \sum_{k=1}^m \frac{\partial z}{\partial c_{kj}} a_{ki} &\implies \frac{\partial z}{\partial \mat{B}} = \left(\mat{A}^T \gradfn{\mat{C}}{z}\right) \odot \mask{\mat{B}}.
 \end{align}
 
+\subsection{Linear Combination of Matrices}
+Let $\mat{C}$ be defined as the linear combination of two matrices $\mat{A}, \mat{B} \in \mathbb{R}^{n \times m}$ like
+\begin{equation}
+  \mat{C} = \alpha\mat{A} + \beta\mat{B}.
+\end{equation}
+From this, we easily get the Jacobian tensors
+\begin{align}
+  \elemwise{\jac{\mat{A}}{\mat{C}}}{(i,j),(i,j)} &= \alpha, \\
+  \elemwise{\jac{\mat{B}}{\mat{C}}}{(i,j),(i,j)} &= \beta, \\
+  \jac{\alpha}{\mat{C}} &= \mat{A}, \\
+  \jac{\beta}{\mat{C}} &= \mat{B},
+\end{align}
+which for $f : \mathbb{R}^{n \times m} \to \mathbb{R}$ and $z=f\left(\mat{C}\right)$, gives the update rules
+\begin{align}
+  \frac{\partial z}{\partial \mat{A}} &= \gradfn{\mat{C}}{z} \jac{\mat{A}}{\mat{C}} = \alpha \gradfn{\mat{C}}{z} \odot \mask{\mat{A}}, \\
+  \frac{\partial z}{\partial \mat{B}} &= \gradfn{\mat{C}}{z} \jac{\mat{B}}{\mat{C}} = \beta \gradfn{\mat{C}}{z} \odot \mask{\mat{B}}, \\
+  \frac{\partial z}{\partial \alpha} &= \gradfn{\mat{C}}{z} \jac{\alpha}{\mat{C}} = \sum_{i=1}^n \sum_{j=1}^m a_{ij}, \\
+  \frac{\partial z}{\partial \beta} &= \gradfn{\mat{C}}{z} \jac{\beta}{\mat{C}} = \sum_{i=1}^n \sum_{j=1}^m b_{ij}.
+\end{align}
 \bibliographystyle{siam}
 \bibliography{background}
 \end{document}

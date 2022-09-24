@@ -264,11 +264,11 @@ class splincomb(torch.autograd.Function):
         for row in range(rows):
             C_rowptr.append(len(C_data))
 
-            i_A = A_rowptr[row]
-            i_B = B_rowptr[row]
+            i_A = (A_rowptr[row]).item()
+            i_B = (B_rowptr[row]).item()
 
-            end_A = A_rowptr[row + 1]
-            end_B = B_rowptr[row + 1]
+            end_A = (A_rowptr[row + 1]).item()
+            end_B = (B_rowptr[row + 1]).item()
 
             # Merge row of A and B
             while i_A < end_A and i_B < end_B:
@@ -301,18 +301,74 @@ class splincomb(torch.autograd.Function):
 
         C_rowptr.append(len(C_data))
 
-        return (torch.Tensor(C_data),
-                torch.Tensor(C_col_ind).long(),
-                torch.Tensor(C_rowptr).long())
+        C_data = torch.Tensor(C_data)
+        C_col_ind = torch.Tensor(C_col_ind).long()
+        C_rowptr = torch.Tensor(C_rowptr).long()
+
+        ctx.save_for_backward(torch.tensor(alpha), A_data, A_col_ind, A_rowptr, torch.tensor(beta), B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr)
+        ctx.shape = shape
+
+        return (C_data, C_col_ind, C_rowptr)
 
 
     @staticmethod
-    def backward(ctx, df_dz):
-        ## TODO: implement this
+    def backward(ctx, grad_C_data, _grad_C_col_ind, _grad_C_rowptr):
+        alpha, A_data, A_col_ind, A_rowptr, beta, B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr = ctx.saved_tensors
+        shape = ctx.shape
 
-        return (None, # C_data
-                None, # C_col_ind
-                None) # C_rowptr
+        # d_da = alpha * grad_c (*) mask(A)
+        grad_A = torch.zeros_like(A_data)
+        for row in range(shape[0]):
+            A_i = (A_rowptr[row]).item()
+            C_i = (C_rowptr[row]).item()
+
+            A_end = (A_rowptr[row+1]).item()
+            C_end = (C_rowptr[row+1]).item()
+
+            while A_i < A_end and C_i < C_end:
+                A_col = A_col_ind[A_i]
+                C_col = C_col_ind[C_i]
+
+                if A_col < C_col:
+                    A_i += 1
+                elif A_col > C_col:
+                    C_i += 1
+                else:
+                    grad_A[A_i] = grad_C_data[C_i] * alpha
+                    A_i += 1
+                    C_i += 1
+
+        # d_db = beta * grad_c (*) mask(B)
+        grad_B = torch.zeros_like(B_data)
+        for row in range(shape[0]):
+            B_i = (B_rowptr[row]).item()
+            C_i = (C_rowptr[row]).item()
+
+            B_end = (B_rowptr[row+1]).item()
+            C_end = (C_rowptr[row+1]).item()
+
+            while B_i < B_end and C_i < C_end:
+                B_col = B_col_ind[B_i]
+                C_col = C_col_ind[C_i]
+
+                if B_col < C_col:
+                    B_i += 1
+                elif B_col > C_col:
+                    C_i += 1
+                else:
+                    grad_B[B_i] = grad_C_data[C_i] * beta
+                    B_i += 1
+                    C_i += 1
+
+        return (None, # shape
+                torch.sum(A_data), # alpha
+                grad_A, # A_data
+                None, # A_col_ind
+                None, # A_rowptr
+                torch.sum(B_data), # beta
+                grad_B, # B_data
+                None, # B_col_ind
+                None) # B_rowptr
 
 
 def eye(N, k=0):
@@ -361,7 +417,9 @@ class SparseCSRTensor(object):
                 # Input is CSR: (data, indices, indptr)
                 assert(shape is not None)
 
-                self.data, self.indices, self.indptr = arg1
+                self.data = torch.clone(arg1[0])
+                self.indices = torch.clone(arg1[1])
+                self.indptr = torch.clone(arg1[2])
                 self.shape = shape
             elif len(arg1) == 2:
                 # Input is COO: (data, (row_ind, col_ind))
@@ -396,22 +454,25 @@ class SparseCSRTensor(object):
         return X
 
     def sum(self):
-        return self.vals.sum()
+        return self.data.sum()
+
+    def abs(self):
+        return SparseCSRTensor((torch.abs(self.data), self.indices, self.indptr), self.shape)
 
     def __add__(self, othr):
         assert(self.shape == othr.shape)
 
         C = splincomb.apply(self.shape,
-                            1., self.data, self.indices, self.indptr,
-                            1., othr.data, othr.indices, othr.indptr)
+                            torch.tensor(1.), self.data, self.indices, self.indptr,
+                            torch.tensor(1.), othr.data, othr.indices, othr.indptr)
         return SparseCSRTensor(C, self.shape)
 
     def __sub__(self, othr):
         assert(self.shape == othr.shape)
 
         C = splincomb.apply(self.shape,
-                            1. , self.data, self.indices, self.indptr,
-                            -1., othr.data, othr.indices, othr.indptr)
+                            torch.tensor(1.) , self.data, self.indices, self.indptr,
+                            torch.tensor(-1.), othr.data, othr.indices, othr.indptr)
         return SparseCSRTensor(C, self.shape)
 
     def __mul__(self, other):
@@ -431,7 +492,11 @@ class SparseCSRTensor(object):
         return SparseCSRTensor((-self.data, self.indices, self.indptr), shape=self.shape)
 
     def __repr__(self):
-        return f"<{self.shape[0]}x{self.shape[1]} sparse matrix tensor of type '{self.data.dtype}'\n\twith {len(self.data)} stored elements in Compressed Sparse Row format>"
+        grad_str = ''
+        if self.data.grad_fn is not None:
+            grad_str = f', grad_fn=<{self.data.grad_fn.__class__.__name__}>'
+
+        return f"<{self.shape[0]}x{self.shape[1]} sparse matrix tensor of type '{self.data.dtype}'\n\twith {len(self.data)} stored elements in Compressed Sparse Row format{grad_str}>"
 
     @property
     def requires_grad(self):
@@ -444,3 +509,14 @@ class SparseCSRTensor(object):
     @property
     def grad(self):
         return SparseCSRTensor((self.data.grad, self.indices, self.indptr), shape=self.shape)
+
+    @property
+    def grad_fn(self):
+        return self.data.grad_fn
+
+    @property
+    def nnz(self):
+        '''
+        Number of stored values, including explicit zeros
+        '''
+        return len(self.data)
