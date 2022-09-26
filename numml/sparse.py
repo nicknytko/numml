@@ -1,12 +1,11 @@
 import torch
-import torch.autograd
 import numml_torch_cpp
 import numpy as np
 
 
 class coo_to_csr(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, values, row_ind, col_ind, shape):
+    def forward(ctx, values, row_ind, col_ind, shape, sorted=False):
         data = torch.clone(values).detach()
         dtype = data.dtype
         N = len(row_ind)
@@ -237,7 +236,7 @@ def sstrsv(upper, unit, A_shape, A_data, A_col_ind, A_rowptr, b):
                 col = A_col_ind[i]
                 if col == row and not unit:
                     diag_entry = A_data[i]
-                elif col >= row:
+                elif col > row:
                     x = p_trisolvesub(x, row, col, A_data[i]) # x[row] -= A_data[i] * x[col]
                 else: # col <= row
                     break # Stop because we are to the left of the diagonal
@@ -258,7 +257,7 @@ def sstrsv(upper, unit, A_shape, A_data, A_col_ind, A_rowptr, b):
                 col = A_col_ind[i]
                 if col == row and not unit:
                     diag_entry = A_data[i]
-                elif col <= row:
+                elif col < row:
                     x = p_trisolvesub(x, row, col, A_data[i])
                 else: # col >= row:
                     break # Stop because we are to the right of the diagonal
@@ -439,6 +438,271 @@ def diag(x, k=0):
         cols = torch.arange(N_k)
 
     return SparseCSRTensor((x, (rows, cols)), shape=(N, N))
+
+def spouter(x, y):
+    '''
+    Returns the outer product of two vectors as a sparse matrix.
+    Note that this is only beneficial if x and y are themselves reasonably sparse, otherwise
+    it is likely better to use the regular dense outer product.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+      First term in outer product
+    y : torch.Tensor
+      Second term in outer product
+
+    Returns
+    -------
+    xyT : SparseCSRTensor
+      The product x * y^T as a sparse tensor.
+    '''
+
+    # A_ij = x_i y_j
+    x_nz = torch.nonzero(x).flatten()
+    y_nz = torch.nonzero(y).flatten()
+
+    row, col = torch.meshgrid(x_nz, y_nz, indexing='ij')
+    row = row.flatten()
+    col = col.flatten()
+
+    val = x[row] * y[col]
+    return SparseCSRTensor((val, (row, col)), shape=(len(x), len(y)))
+
+class tril(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, shape,
+                A_data, A_col_ind, A_rowptr,
+                k):
+        L_data = []
+        L_indices = []
+        L_indptr = []
+
+        L_to_A = []
+
+        for row in range(shape[0]):
+            L_indptr.append(len(L_data))
+
+            for i in range(A_rowptr[row], A_rowptr[row + 1]):
+                col = A_col_ind[i].item()
+                if col > row + k:
+                    break
+
+                L_data.append(A_data[i])
+                L_indices.append(A_col_ind[i])
+                L_to_A.append(i)
+        L_indptr.append(len(L_data))
+
+        L_data = torch.Tensor(L_data)
+        L_indices = torch.Tensor(L_indices).long()
+        L_indptr = torch.Tensor(L_indptr).long()
+
+        L_to_A = torch.Tensor(L_to_A).long()
+        ctx.save_for_backward(A_col_ind, A_rowptr, L_to_A)
+        ctx.shape = shape
+
+        return L_data, L_indices, L_indptr
+
+    @staticmethod
+    def backward(ctx, grad_L_data, _grad_L_indices, _grad_L_indptr):
+        A_col_ind, A_rowptr, L_to_A = ctx.saved_tensors
+        shape = ctx.shape
+
+        grad_A_data = torch.zeros_like(A_col_ind)
+        for i in range(len(grad_L_data)):
+            grad_A_data[L_to_A[i]] = grad_L_data[i]
+
+        return (None, # shape
+                grad_A_data, # A_data
+                None, # A_col_ind
+                None, # A_rowptr
+                None) # k
+
+class triu(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, shape,
+                A_data, A_col_ind, A_rowptr,
+                k):
+        U_data = []
+        U_indices = []
+        U_indptr = []
+
+        U_to_A = []
+
+        for row in range(shape[0]):
+            U_indptr.append(len(U_data))
+
+            for i in range(A_rowptr[row], A_rowptr[row + 1]):
+                col = A_col_ind[i].item()
+                if col < row + k:
+                    continue
+
+                U_data.append(A_data[i])
+                U_indices.append(A_col_ind[i])
+                U_to_A.append(i)
+        U_indptr.append(len(U_data))
+
+        U_data = torch.Tensor(U_data)
+        U_indices = torch.Tensor(U_indices).long()
+        U_indptr = torch.Tensor(U_indptr).long()
+
+        U_to_A = torch.Tensor(U_to_A).long()
+        ctx.save_for_backward(A_col_ind, A_rowptr, U_to_A)
+        ctx.shape = shape
+
+        return U_data, U_indices, U_indptr
+
+    @staticmethod
+    def backward(ctx, grad_U_data, _grad_U_indices, _grad_U_indptr):
+        A_col_ind, A_rowptr, U_to_A = ctx.saved_tensors
+        shape = ctx.shape
+
+        grad_A_data = torch.zeros_like(A_col_ind)
+        for i in range(len(grad_U_data)):
+            grad_A_data[U_to_A[i]] = grad_U_data[i]
+
+        return (None, # shape
+                grad_A_data, # A_data
+                None, # A_col_ind
+                None, # A_rowptr
+                None) # k
+
+class spcolscale(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, shape,
+                A_data, A_col_ind, A_rowptr,
+                row_start, column):
+        B_data = torch.clone(A_data.detach())
+
+        diag_entry = None
+        for i in range(A_rowptr[row_start], A_rowptr[row_start + 1]):
+            if A_col_ind[i] == row_start:
+                diag_entry = A_data[i]
+                break
+
+        if diag_entry is None:
+            raise RuntimeError('Matrix has no explicit diagonal entry!')
+        if diag_entry == 0.:
+            raise RuntimeError('Division by zero: matrix has explicit zero on diagonal.')
+
+        B_data[torch.logical_and(A_col_ind == column, torch.arange(len(A_data)) >= A_rowptr[row_start+1])] /= diag_entry
+
+        ctx.save_for_backward(A_data, A_col_ind, A_rowptr)
+        ctx.row_start = row_start
+        ctx.column = column
+        ctx.shape = shape
+
+        return B_data, A_col_ind, A_rowptr
+
+    @staticmethod
+    def backward(ctx, grad_B_data, _grad_B_col_ind, _grad_B_rowptr):
+        A_data, A_col_ind, A_rowptr = ctx.saved_tensors
+        row_start = ctx.row_start
+        column = ctx.column
+        shape = ctx.shape
+
+        # print('--spcolscale', row_start, column)
+        # print(A_data)
+        # print(A_col_ind)
+        # print(A_rowptr)
+
+        grad_A = torch.clone(grad_B_data)
+        kk_entry = None
+        for row in range(row_start, shape[0]):
+            for i in range(A_rowptr[row], A_rowptr[row + 1]):
+                col = A_col_ind[i]
+
+                if col == column:
+                    #print('col == column at row', row)
+                    if row == row_start:
+                        kk_entry = i
+                        #print('found diagonal entry', i)
+                        #grad_A[i] = 0.
+                    else:
+                        # print(A_data[kk_entry], grad_A[i])
+                        grad_A[i] /= A_data[kk_entry]
+                        grad_A[kk_entry] -= grad_B_data[i] * (A_data[i] / (A_data[kk_entry]) ** 2.)
+                    break
+
+        return (None,   # shape
+                grad_A, # A_data
+                None,   # A_col_ind
+                None,   # A_rowptr
+                None,   # row_start
+                None)   # column
+
+def splu(A):
+    '''
+    Sparse LU factorization *without* pivoting
+
+    Parameters
+    ----------
+    A : SparseCSRTensor
+      Sparse tensor on which to perform the LU factorization
+
+    Returns
+    -------
+    M : SparseCSRTensor
+      Sparse tensor M in which entries below the main diagonal correspond
+      to 'L', while entries including and above the main diagonal correspond
+      to 'U'
+    '''
+
+    # Helper to do the column scaling
+    def apply_spcolscale(A, k):
+        # print(f'column scaling ({k}):')
+        # print(A.detach().to_dense())
+        B_data, B_indices, B_indptr = spcolscale.apply(A.shape, A.data, A.indices, A.indptr, k, k)
+        return SparseCSRTensor((B_data, B_indices, B_indptr), shape=A.shape)
+
+    M = A.copy()
+    for k in range(A.shape[0] - 1):
+        M = apply_spcolscale(M, k)
+        M_row = torch.zeros(A.shape[1])
+        M_col = torch.zeros(A.shape[0])
+
+        # Get row of M
+        for i in range(M.indptr[k], M.indptr[k+1]):
+            col = M.indices[i]
+            if col > k:
+                M_row[col] = M.data[i]
+
+        # Get col of M
+        for row in range(k+1, M.shape[0]):
+            for i in range(M.indptr[row], M.indptr[row + 1]):
+                col = M.indices[i]
+                if col == k:
+                    M_col[row] = M.data[i]
+                    break
+
+        M = M - spouter(M_col, M_row)
+    return M
+
+
+def splu_solve(LU, b):
+    y = LU.solve_triangular(upper=False, unit=True, b=b)
+    return LU.solve_triangular(upper=True, unit=False, b=y)
+
+def spsolve(A, b):
+    '''
+    Solves a sparse system of linear equations for a vector right-hand-side.
+
+    Parameters
+    ----------
+    A : SparseCSRTensor
+      Sparse, square tensor encoding some system of equations.
+    b : torch.Tensor
+      Dense right-hand-side vector.
+
+    Returns
+    -------
+    x : torch.Tensor
+      The solution to A^{-1} b
+    '''
+
+    LU = splu(A)
+    return splu_solve(LU, b)
+
 
 class SparseCSRTensor(object):
     def __init__(self, arg1, shape=None):
@@ -641,3 +905,14 @@ class SparseCSRTensor(object):
                     D[row] = self.data[i]
 
         return D
+
+    def tril(self, k=0):
+        L_data, L_indices, L_indptr = tril.apply(self.shape, self.data, self.indices, self.indptr, k)
+        return SparseCSRTensor((L_data, L_indices, L_indptr), self.shape)
+
+    def triu(self, k=0):
+        U_data, U_indices, U_indptr = triu.apply(self.shape, self.data, self.indices, self.indptr, k)
+        return SparseCSRTensor((U_data, U_indices, U_indptr), self.shape)
+
+    def detach(self):
+        return SparseCSRTensor((self.data.detach(), self.indices, self.indptr), self.shape)

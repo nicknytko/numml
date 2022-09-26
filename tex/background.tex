@@ -214,6 +214,36 @@ which for $f : \mathbb{R}^{n \times m} \to \mathbb{R}$ and $z=f\left(\mat{C}\rig
   \frac{\partial z}{\partial \alpha} &= \gradfn{\mat{C}}{z} \jac{\alpha}{\mat{C}} = \sum_{i=1}^n \sum_{j=1}^m a_{ij}, \\
   \frac{\partial z}{\partial \beta} &= \gradfn{\mat{C}}{z} \jac{\beta}{\mat{C}} = \sum_{i=1}^n \sum_{j=1}^m b_{ij}.
 \end{align}
+
+\subsection{LU Column Scale}
+For some column and starting row $k$ for matrix $\mat{A} \in \mathbb{R}^{n \times m}$, let the \textit{column scaling operation} in LU be defined entrywise like
+\begin{equation}
+  b_{ij} = \begin{cases}
+    a_{ij} / a_{kk} & i > k, j=k \\
+    a_{ij} & \text{otherwise}
+  \end{cases}.
+\end{equation}
+This gives entrywise partial derivatives like
+\begin{align}
+  \frac{\partial b_{ij}}{\partial a_{ij}} &= \begin{cases}
+    1 & i=j=k \\
+    1 / a_{kk} & i > k, j=k \\
+    1 & \text{otherwise}
+  \end{cases}, \\
+  \frac{\partial b_{ij}}{\partial a_{kk}} &= \begin{cases}
+    0 & i=j=k \\
+    -a_{ij} / a_{kk}^2 & i > k, j=k \\
+    0 & \text{otherwise}
+  \end{cases},
+\end{align}
+which for $f : \mathbb{R}^{n \times m} \to \mathbb{R}$ and $z=f\left(\mat{B}\right)$, gives the update rule
+\begin{equation}
+  \frac{\partial z}{\partial a_{ij}} = \sum_x \sum_y \frac{\partial z}{\partial b_{xy}} \frac{\partial b_{xy}}{\partial a_{ij}} = \begin{cases}
+    \frac{\partial z}{\partial b_{ij}} - \sum_{x=k+1}^n \frac{\partial z}{\partial b_{xk}} a_{xk}/a_{kk} & i=j=k \\
+    \frac{\partial z}{\partial b_{ij}} / a_{kk} & i > k, j=k \\
+    \frac{\partial z}{\partial b_{ij}} & \text{otherwise}
+  \end{cases}.
+\end{equation}
 \bibliographystyle{siam}
 \bibliography{background}
 \end{document}
