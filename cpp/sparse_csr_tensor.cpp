@@ -175,6 +175,61 @@ std::vector<torch::Tensor> spgemm_backward(torch::Tensor grad_C, torch::Tensor C
     return {grad_A, grad_B};
 }
 
+/* CSR Transpose */
+
+std::vector<torch::Tensor> csr_transpose_forward(int A_rows, int A_columns,
+                                                 torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    /* Based on the implementation from Scipy:
+       https://github.com/scipy/scipy/blob/3b36a574dc657d1ca116f6e230be694f3de31afc/scipy/sparse/sparsetools/csr.h#L380 */
+
+    int nnz = A_indptr[A_rows].item<int>();
+
+    torch::Tensor At_data = torch::zeros(nnz);
+    torch::Tensor At_indptr = torch::zeros(A_columns + 1, torch::TensorOptions().dtype(torch::kLong));
+    torch::Tensor At_indices = torch::zeros(nnz, torch::TensorOptions().dtype(torch::kLong));
+
+    /* Compute number of nonzeros per column of A */
+    for (int i = 0; i < nnz; i++) {
+        At_indptr[A_indices[i]] += 1;
+    }
+
+    /* Now, compute the cumulative sum of nnz to get starting rowptrs of A^T */
+    int cumsum = 0;
+    for (int column = 0; column < A_columns; column++) {
+        int old_idx = At_indptr[column].item<int>();
+        At_indptr[column] = cumsum;
+        cumsum += old_idx;
+    }
+    At_indptr[A_columns] = nnz;
+
+    /* Move data values into their correct spots */
+    torch::Tensor At_row_acc = At_indptr.clone();
+    torch::Tensor At_to_A_idx = torch::zeros(nnz, torch::TensorOptions().dtype(torch::kLong));
+    for (int row = 0; row < A_rows; row ++) {
+        for (int i = A_indptr[row].item<int>(); i < A_indptr[row + 1].item<int>(); i++) {
+            int column = A_indices[i].item<int>();
+            int dest = At_row_acc[column].item<int>();
+
+            At_indices[dest] = row;
+            At_data[dest] = A_data[i];
+            At_to_A_idx[dest] = i;
+
+            At_row_acc[column] += 1;
+        }
+    }
+
+    return {At_data, At_indices, At_indptr, At_to_A_idx};
+}
+
+torch::Tensor csr_transpose_backward(torch::Tensor grad_At, torch::Tensor At_to_A_idx) {
+    torch::Tensor grad_A = torch::zeros_like(grad_At);
+
+    for (int i = 0; i < grad_At.size(0); i++) {
+        grad_A[At_to_A_idx[i].item<int>()] = grad_At[i];
+    }
+
+    return grad_A;
+}
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
@@ -182,4 +237,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("spgemm_forward", &spgemm_forward, "SPGEMM forward");
     m.def("spgemm_backward", &spgemm_backward, "SPGEMM backward");
+
+    m.def("csr_transpose_forward", &csr_transpose_forward, "CSR Transpose forward");
+    m.def("csr_transpose_backward", &csr_transpose_backward, "CSR Transpose backward");
 }

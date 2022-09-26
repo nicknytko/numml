@@ -703,6 +703,25 @@ def spsolve(A, b):
     LU = splu(A)
     return splu_solve(LU, b)
 
+class sptranspose(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr):
+        At_data, At_indices, At_indptr, At_to_A_idx = \
+            numml_torch_cpp.csr_transpose_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
+
+        ctx.save_for_backward(At_to_A_idx)
+        return A_shape[::-1], At_data, At_indices, At_indptr
+
+    @staticmethod
+    def backward(ctx, _grad_A_shape, grad_At_data, _grad_At_indices, _grad_At_indptr):
+        (At_to_A_idx,) = ctx.saved_tensors
+        grad_A = numml_torch_cpp.csr_transpose_backward(grad_At_data, At_to_A_idx)
+
+        return (None, # A_shape
+                grad_A, # A_data
+                None, # A_indices
+                None) # A_indptr
+
 
 class SparseCSRTensor(object):
     def __init__(self, arg1, shape=None):
@@ -916,3 +935,11 @@ class SparseCSRTensor(object):
 
     def detach(self):
         return SparseCSRTensor((self.data.detach(), self.indices, self.indptr), self.shape)
+
+    def transpose(self):
+        At_shape, At_data, At_indices, At_indptr = sptranspose.apply(self.shape, self.data, self.indices, self.indptr)
+        return SparseCSRTensor((At_data, At_indices, At_indptr), At_shape)
+
+    @property
+    def T(self):
+        return self.transpose()
