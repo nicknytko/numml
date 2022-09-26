@@ -48,11 +48,8 @@ class spgemv(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, A_shape, alpha, A_data, A_col_ind, A_rowptr, x, beta, y):
-        Ax = torch.zeros(A_shape[0], dtype=x.dtype)
-        for row_i in range(len(A_rowptr) - 1):
-            for col_j in range(A_rowptr[row_i], A_rowptr[row_i + 1]):
-                Ax[row_i] += A_data[col_j] * x[A_col_ind[col_j]]
-        z = alpha * Ax + beta * y
+        Ax, z = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], alpha,
+                                               A_data, A_col_ind, A_rowptr, x, beta, y)
 
         ctx.save_for_backward(Ax, x, y, A_data, A_col_ind, A_rowptr)
         ctx.shape = A_shape
@@ -68,26 +65,15 @@ class spgemv(torch.autograd.Function):
         alpha = ctx.alpha
         beta = ctx.beta
 
-        # A_data
-        d_A_data = torch.clone(A_data)
-        for row in range(len(A_rowptr) - 1):
-            for i in range(A_rowptr[row], A_rowptr[row+1]):
-                col = A_col_ind[i]
-                d_A_data[i] = alpha * df_dz[row] * x[col]
-
-        # df_dx
-        df_dx = torch.zeros_like(x)
-        for row in range(len(A_rowptr) - 1):
-            for i in range(A_rowptr[row], A_rowptr[row+1]):
-                col = A_col_ind[i]
-                df_dx[col] += df_dz[row] * A_data[i] * alpha
+        grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1], alpha,
+                                                         A_data, A_col_ind, A_rowptr, x, beta, y)
 
         return (None, # A_shape
                 torch.sum(df_dz * Ax), # alpha
-                d_A_data, # A_data
+                grad_A, # A_data
                 None, # A_col_ind
                 None, # A_rowptr
-                df_dx, # x
+                grad_x, # x
                 torch.sum(df_dz * y), # beta
                 df_dz * beta) # y
 
@@ -105,44 +91,8 @@ class spgemm(torch.autograd.Function):
         assert(A_shape[1] == B_shape[0])
         C_shape = (A_shape[0], B_shape[1])
 
-        # Start with a sparse dict representation of C
-        C_dict = [None] * C_shape[0]
-        C_nnz = 0
-
-        # Do the matrix product by partial sums over each entry of A and rows of B
-        for A_row in range(A_shape[0]):
-            for A_i in range(A_indptr[A_row], A_indptr[A_row+1]):
-                A_col = (A_indices[A_i]).item()
-                for B_i in range(B_indptr[A_col], B_indptr[A_col+1]):
-                    B_col = (B_indices[B_i]).item()
-
-                    i, j = A_row, B_col
-                    if C_dict[i] is None:
-                        C_dict[i] = {}
-                    if not j in C_dict[i]:
-                        C_dict[i][j] = 0.
-                        C_nnz += 1
-                    C_dict[i][j] = C_dict[i][j] + A_data[A_i].item() * B_data[B_i].item()
-
-        # Convert to CSR repr
-        C_data = torch.zeros(C_nnz, dtype=A_data.dtype)
-        C_indices = torch.zeros(C_nnz).long()
-        C_indptr = torch.zeros(C_shape[0] + 1).long()
-
-        # print('nnz', C_nnz)
-        # print('C_dict', C_dict)
-
-        C_i = 0
-        for C_row in range(C_shape[0]):
-            C_indptr[C_row] = C_i
-
-            colval = sorted(C_dict[C_row].items(), key=lambda tup: tup[0])
-            for C_col, val in colval:
-                # print(f'C[{C_row}, {C_col}] = C_data[{C_i}] = {val}')
-                C_data[C_i] = val
-                C_indices[C_i] = C_col
-                C_i += 1
-        C_indptr[-1] = C_nnz
+        C_data, C_indices, C_indptr = numml_torch_cpp.spgemm_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
+                                                                     B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
 
         ctx.save_for_backward(A_data, A_indices, A_indptr, B_data, B_indices, B_indptr, C_data, C_indices, C_indptr)
         ctx.A_shape = A_shape
@@ -159,65 +109,9 @@ class spgemm(torch.autograd.Function):
         B_shape = ctx.B_shape
         C_shape = ctx.C_shape
 
-        ## dA = (grad_C * B^T) (*) mask(A)
-        grad_A = torch.zeros_like(A_data)
-        A_mask = {}
-
-        # first, build i,j -> A_data idx mapping
-        for A_row in range(A_shape[0]):
-            A_mask[A_row] = {}
-            for A_i in range(A_indptr[A_row], A_indptr[A_row+1]):
-                A_mask[A_row][A_indices[A_i].item()] = A_i
-
-        # now, compute grad_C * B^T
-        for C_row in range(len(C_indptr)-1):
-            for B_row in range(len(B_indptr)-1):
-                if B_row not in A_mask[C_row]: # skip this entry because of mask
-                    continue
-
-                C_row_i = (C_indptr[C_row]).item()
-                B_row_i = (B_indptr[B_row]).item()
-
-                C_row_end = (C_indptr[C_row + 1]).item()
-                B_row_end = (B_indptr[B_row + 1]).item()
-
-                aij = 0.
-
-                while C_row_i < C_row_end and B_row_i < B_row_end:
-                    C_col = C_indices[C_row_i]
-                    B_col = B_indices[B_row_i]
-
-                    if C_col < B_col:
-                        C_row_i += 1
-                    elif C_col > B_col:
-                        B_row_i += 1
-                    else:
-                        aij += grad_C_data[C_row_i] * B_data[B_row_i]
-                        C_row_i += 1
-                        B_row_i += 1
-
-                grad_A[A_mask[C_row][B_row]] = aij
-
-        ## dB = (A^T * grad_C) (*) mask(B)
-        grad_B = torch.zeros_like(B_data)
-
-        # build index map
-        B_mask = {}
-        for B_row in range(B_shape[0]):
-            B_mask[B_row] = {}
-            for B_i in range(B_indptr[B_row], B_indptr[B_row+1]):
-                B_mask[B_row][B_indices[B_i].item()] = B_i
-
-        # compute A^T grad_C
-        for A_row in range(len(A_indptr)-1):
-            for A_row_i in range(A_indptr[A_row], A_indptr[A_row+1]):
-                A_col = A_indices[A_row_i].item()
-                for C_row_i in range(C_indptr[A_row], C_indptr[A_row+1]):
-                    C_col = C_indices[C_row_i].item()
-                    if C_col not in B_mask[A_col]:
-                        continue # skip this entry because of mask
-
-                    grad_B[B_mask[A_col][C_col]] += A_data[A_row_i] * grad_C_data[C_row_i]
+        grad_A, grad_B = numml_torch_cpp.spgemm_backward(grad_C_data, C_indices, C_indptr,
+                                                         A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
+                                                         B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
 
         return (None, # A_shape
                 grad_A,

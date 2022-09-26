@@ -157,20 +157,20 @@ for $\mat{A} \in \mathbb{R}^{n \times m}, \vec{x} \in \mathbb{R}^m; \vec{y}, \ve
 
 Taking partial derivatives gives
 \begin{align}
-  \frac{\partial z_i}{\partial a_{i,j}} &= \alpha x_j, \\
-  \frac{\partial z_i}{\partial x_j} &= \alpha a_{i, j} \\
-  \frac{\partial z_i}{\partial \alpha} &= \sum_k a_{i,k} x_k, \\
-  \frac{\partial z_i}{\partial y_i} &= \beta, \\
-  \frac{\partial z_i}{\partial \beta} &= y_i.
+  \frac{\partial w_i}{\partial a_{ij}} &= \alpha x_j, \\
+  \frac{\partial w_i}{\partial x_j} &= \alpha a_{ij} \\
+  \frac{\partial w_i}{\partial \alpha} &= \sum_k a_{ik} x_k, \\
+  \frac{\partial w_i}{\partial y_i} &= \beta, \\
+  \frac{\partial w_i}{\partial \beta} &= y_i.
 \end{align}
 
 Applying the chain rule to some function $f : \mathbb{R}^n \to \mathbb{R}$ like $z=f\left(\vec{w}\right)$ results in the update rules
 \begin{align}
-  \frac{\partial z}{\partial a_{ij}} &= \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial a_{i,j}} = \alpha \frac{\partial z}{\partial w_i} x_j, \\
-  \frac{\partial z}{\partial x_j} &= \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial x_j} = \alpha \sum_k \frac{\partial z}{\partial w_k} a_{k, j} = \alpha \grad_{\vec{w}}\left(z\right) \mat{A} \\
-  \frac{\partial z}{\partial \alpha} &= \sum_k \frac{\partial z}{\partial w_j} \frac{\partial w_j}{\partial \alpha} = \sum_j \frac{\partial z}{\partial w_j} \sum_k a_{jk} x_k, \\
-  \frac{\partial z}{\partial y_i} &= \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial y_i} = \beta \frac{\partial z}{\partial w_i}, \\
-  \frac{\partial z}{\partial \beta} &= \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial \beta} = \sum_k \frac{\partial z}{\partial w_k} y_k.
+  \frac{\partial z}{\partial a_{ij}} = \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial a_{i,j}} = \alpha \frac{\partial z}{\partial w_i} x_j &\implies \gradfn{\mat{A}}{z} = \alpha\left(\gradfn{\vec{w}}{z} \vec{x}^T\right) \odot \mask{\mat{A}} \\
+  \frac{\partial z}{\partial x_j} = \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial x_j} = \alpha \sum_k \frac{\partial z}{\partial w_k} a_{k, j} &\implies \gradfn{\vec{x}}{z} = \alpha \mat{A}^T \grad_{\vec{w}}\left(z\right) \\
+  \frac{\partial z}{\partial \alpha} = \sum_k \frac{\partial z}{\partial w_j} \frac{\partial w_j}{\partial \alpha} = \sum_j \frac{\partial z}{\partial w_j} \sum_k a_{jk} x_k &\implies \gradfn{\alpha}{z} = \gradfn{\vec{w}}{z}^T \mat{A} \vec{x} \\
+  \frac{\partial z}{\partial y_i} = \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial y_i} = \beta \frac{\partial z}{\partial w_i} &\implies \gradfn{\vec{y}}{z} = \beta \gradfn{\vec{w}}{z} \\
+  \frac{\partial z}{\partial \beta} = \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial \beta} = \sum_k \frac{\partial z}{\partial w_k} y_k &\implies \gradfn{\beta}{z} = \gradfn{\vec{w}}{z}^T \vec{y}.
 \end{align}
 
 \subsection{SPGEMM}
@@ -191,8 +191,8 @@ which emits the partial derivatives
 \end{align}
 Applying the chain rule to some function $f : \mathbb{R}^{m \times o} \to \mathbb{R}$ like $z=f\left(\mat{C}\right)$ results in the update rules
 \begin{align}
-  \frac{\partial z}{\partial a_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial a_{ij}} = \sum_{l=1}^o \frac{\partial z}{\partial c_{il}} b_{jl} &\implies \frac{\partial z}{\partial \mat{A}} = \left(\gradfn{\mat{C}}{z} \mat{B}^T\right) \odot \mask{\mat{A}}, \\
-  \frac{\partial z}{\partial b_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial b_{ij}} = \sum_{k=1}^m \frac{\partial z}{\partial c_{kj}} a_{ki} &\implies \frac{\partial z}{\partial \mat{B}} = \left(\mat{A}^T \gradfn{\mat{C}}{z}\right) \odot \mask{\mat{B}}.
+  \frac{\partial z}{\partial a_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial a_{ij}} = \sum_{l=1}^o \frac{\partial z}{\partial c_{il}} b_{jl} &\implies \gradfn{\mat{A}}{z} = \left(\gradfn{\mat{C}}{z} \mat{B}^T\right) \odot \mask{\mat{A}}, \\
+  \frac{\partial z}{\partial b_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial b_{ij}} = \sum_{k=1}^m \frac{\partial z}{\partial c_{kj}} a_{ki} &\implies \gradfn{\mat{B}}{z} = \left(\mat{A}^T \gradfn{\mat{C}}{z}\right) \odot \mask{\mat{B}}.
 \end{align}
 
 \subsection{Linear Combination of Matrices}
