@@ -775,10 +775,13 @@ class SparseCSRTensor(object):
         return SparseCSRTensor((C_data, C_indices, C_indptr), C_shape)
 
     def __matmul__(self, x):
+        dims = None
         if isinstance(x, torch.Tensor):
             dims = len(torch.squeeze(x).shape)
         elif isinstance(x, SparseCSRTensor):
             dims = 2
+        else:
+            raise RuntimeError(f'Unknown type for matmul: {type(x)}.')
 
         if dims == 1:
             return self.spmv(x)
