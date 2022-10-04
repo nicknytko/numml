@@ -11,3 +11,15 @@ then, install with
 ```
 pip3 install .
 ```
+
+If CUDA is not detected on your system, this will silently default to compiling only CPU
+implementations: you can run pip with verbose (`-v`) for a sanity check on this.
+
+### Tests
+
+Run tests using pytest like
+```
+pytest numml/tests
+```
+
+Note that the test cases will assume you are running on a machine with CUDA installed and you have compiled with CUDA support.

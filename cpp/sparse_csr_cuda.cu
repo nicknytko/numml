@@ -55,18 +55,22 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     auto options = torch::TensorOptions()
         .dtype(A_data.dtype())
         .device(A_data.device().type(), A_data.device().index());
-    torch::Tensor Ax = torch::zeros({A_rows}, options);
 
+    at::cuda::CUDAStream main_stream = at::cuda::getStreamFromPool();
+    at::cuda::setCurrentCUDAStream(main_stream);
+
+    torch::Tensor Ax = torch::empty({A_rows}, options);
     const int threads_per_block = 512;
     const int threads = A_rows;
     const dim3 blocks((threads + threads_per_block - 1) / threads_per_block, 1);
 
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_forward_cuda", ([&] {
-        spgemv_forward_cuda_kernel_matvec<scalar_t><<<blocks, threads_per_block>>>(
+        spgemv_forward_cuda_kernel_matvec<scalar_t><<<blocks, threads_per_block, 0, main_stream>>>(
             A_rows, A_cols,
             tensor_acc(A_data, scalar_t), tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t),
             tensor_acc(x, scalar_t), tensor_acc(Ax, scalar_t));
     }));
+    main_stream.synchronize();
 
     return {Ax, alpha * Ax + beta * y};
 }
@@ -101,12 +105,12 @@ __global__ void spgemv_backward_cuda_kernel_grad_A(
 __device__ int64_t kernel_indices_binsearch(int64_t i_start, int64_t i_end, int64_t i_search,
                                             const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> indices) {
     int64_t i_mid;
-    while (i_start > i_end+1) {
-        i_mid = (i_start + i_end)/2;
+    while (i_start <= i_end) {
+        i_mid = (i_start + i_end) / 2;
         if (indices[i_mid] < i_search) {
-            i_start = i_mid;
+            i_start = i_mid + 1;
         } else if (indices[i_mid] > i_search) {
-            i_end = i_mid;
+            i_end = i_mid - 1;
         } else if (indices[i_mid] == i_search) {
             return i_mid;
         }
@@ -152,13 +156,16 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
 
     const int threads_per_block = 512;
+    at::cuda::CUDAStream A_stream = at::cuda::getStreamFromPool();
+    at::cuda::CUDAStream x_stream = at::cuda::getStreamFromPool();
 
     /* Gradient wrt A */
-    torch::Tensor grad_A = torch::zeros_like(A_data);
+    at::cuda::setCurrentCUDAStream(A_stream);
+    torch::Tensor grad_A = torch::empty_like(A_data);
     const int grad_A_threads = A_data.sizes()[0];
     const dim3 grad_A_blocks((grad_A_threads + threads_per_block - 1) / threads_per_block, 1);
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_backward_cuda", ([&] {
-        spgemv_backward_cuda_kernel_grad_A<scalar_t><<<grad_A_blocks, threads_per_block>>>(
+        spgemv_backward_cuda_kernel_grad_A<scalar_t><<<grad_A_blocks, threads_per_block, 0, A_stream>>>(
             A_rows, A_cols, alpha.item<scalar_t>(),
             tensor_acc(grad_z, scalar_t), tensor_acc(grad_A, scalar_t),
             tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t),
@@ -166,16 +173,20 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     }));
 
     /* Gradient wrt x */
-    torch::Tensor grad_x = torch::zeros_like(x);
+    at::cuda::setCurrentCUDAStream(x_stream);
+    torch::Tensor grad_x = torch::empty_like(x);
     const int grad_x_threads = x.sizes()[0];
     const dim3 grad_x_blocks((grad_x_threads + threads_per_block - 1) / threads_per_block, 1);
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_backward_cuda", ([&] {
-        spgemv_backward_cuda_kernel_grad_x<scalar_t><<<grad_x_blocks, threads_per_block>>>(
+        spgemv_backward_cuda_kernel_grad_x<scalar_t><<<grad_x_blocks, threads_per_block, 0, x_stream>>>(
             A_rows, A_cols, alpha.item<scalar_t>(),
             tensor_acc(grad_z, scalar_t),
             tensor_acc(A_data, scalar_t), tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t),
             tensor_acc(grad_x, scalar_t));
     }));
+
+    A_stream.synchronize();
+    x_stream.synchronize();
 
     return {grad_A, grad_x};
 }
