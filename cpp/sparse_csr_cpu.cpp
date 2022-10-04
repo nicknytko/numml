@@ -2,12 +2,20 @@
 #include <map>
 #include <tuple>
 
+#include "sparse_csr.hpp"
+
 /* Sparse GEMV */
 
-std::vector<torch::Tensor> spgemv_forward(int A_rows, int A_cols, torch::Tensor alpha,
-                                          torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-                                          torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
-    torch::Tensor Ax = torch::zeros({A_rows}, A_data.dtype());
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              spgemv_forward,
+              int A_rows, int A_cols, torch::Tensor alpha,
+              torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
+              torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
+    auto options = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+
+    torch::Tensor Ax = torch::zeros({A_rows}, options);
     for (int row_i = 0; row_i < A_rows; row_i++) {
         for (int col_j = A_rowptr[row_i].item<int>(); col_j < A_rowptr[row_i + 1].item<int>(); col_j++) {
             Ax[row_i] += A_data[col_j] * x[A_col_ind[col_j]];
@@ -16,9 +24,11 @@ std::vector<torch::Tensor> spgemv_forward(int A_rows, int A_cols, torch::Tensor 
     return {Ax, alpha * Ax + beta * y};
 }
 
-std::vector<torch::Tensor> spgemv_backward(torch::Tensor grad_z, int A_rows, int A_cols, torch::Tensor alpha,
-                                           torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-                                           torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              spgemv_backward,
+              torch::Tensor grad_z, int A_rows, int A_cols, torch::Tensor alpha,
+              torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
+              torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
 
     /* grad_A = alpha * outer(grad_w, x) (*) mask(A) */
     torch::Tensor grad_A = torch::zeros_like(A_data);
@@ -43,8 +53,10 @@ std::vector<torch::Tensor> spgemv_backward(torch::Tensor grad_z, int A_rows, int
 
 /* Sparse GEMM */
 
-std::vector<torch::Tensor> spgemm_forward(int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
-                                          int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              spgemm_forward,
+              int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
     int C_rows = A_rows;
     int C_cols = B_cols;
 
@@ -95,9 +107,11 @@ std::vector<torch::Tensor> spgemm_forward(int A_rows, int A_cols, torch::Tensor 
     return {C_data, C_indices, C_indptr};
 }
 
-std::vector<torch::Tensor> spgemm_backward(torch::Tensor grad_C, torch::Tensor C_indices, torch::Tensor C_indptr,
-                                           int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
-                                           int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              spgemm_backward,
+              torch::Tensor grad_C, torch::Tensor C_indices, torch::Tensor C_indptr,
+              int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
     int C_rows = A_rows;
     int C_cols = B_cols;
 
@@ -177,8 +191,10 @@ std::vector<torch::Tensor> spgemm_backward(torch::Tensor grad_C, torch::Tensor C
 
 /* CSR Transpose */
 
-std::vector<torch::Tensor> csr_transpose_forward(int A_rows, int A_columns,
-                                                 torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              csr_transpose_forward,
+              int A_rows, int A_columns,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
     /* Based on the implementation from Scipy:
        https://github.com/scipy/scipy/blob/3b36a574dc657d1ca116f6e230be694f3de31afc/scipy/sparse/sparsetools/csr.h#L380 */
 
@@ -221,7 +237,9 @@ std::vector<torch::Tensor> csr_transpose_forward(int A_rows, int A_columns,
     return {At_data, At_indices, At_indptr, At_to_A_idx};
 }
 
-torch::Tensor csr_transpose_backward(torch::Tensor grad_At, torch::Tensor At_to_A_idx) {
+FUNC_IMPL_CPU(torch::Tensor,
+              csr_transpose_backward,
+              torch::Tensor grad_At, torch::Tensor At_to_A_idx) {
     torch::Tensor grad_A = torch::zeros_like(grad_At);
 
     for (int i = 0; i < grad_At.size(0); i++) {
@@ -229,15 +247,4 @@ torch::Tensor csr_transpose_backward(torch::Tensor grad_At, torch::Tensor At_to_
     }
 
     return grad_A;
-}
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
-    m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
-
-    m.def("spgemm_forward", &spgemm_forward, "SPGEMM forward");
-    m.def("spgemm_backward", &spgemm_backward, "SPGEMM backward");
-
-    m.def("csr_transpose_forward", &csr_transpose_forward, "CSR Transpose forward");
-    m.def("csr_transpose_backward", &csr_transpose_backward, "CSR Transpose backward");
 }

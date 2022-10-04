@@ -764,7 +764,9 @@ class SparseCSRTensor(object):
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
 
     def spmv(self, x):
-        return spgemv.apply(self.shape, torch.tensor(1.), self.data, self.indices, self.indptr, x, torch.tensor(0.), torch.zeros(self.shape[0]))
+        return spgemv.apply(self.shape,
+                            torch.tensor(1.).to(x.device), self.data, self.indices, self.indptr, x,
+                            torch.tensor(0.).to(x.device), torch.zeros(self.shape[0]).to(x.device))
 
     def solve_triangular(self, upper, unit, b):
         return sstrsv(upper, unit, self.shape, self.data, self.indices, self.indptr, b)
@@ -851,10 +853,15 @@ class SparseCSRTensor(object):
 
     def __repr__(self):
         grad_str = ''
+        dev_str = ''
         if self.data.grad_fn is not None:
             grad_str = f', grad_fn=<{self.data.grad_fn.__class__.__name__}>'
+        elif self.requires_grad:
+            grad_str = ', requires_grad=True'
+        if self.device.type != 'cpu':
+            dev_str = f', device=\'{str(self.device)}\''
 
-        return f"<{self.shape[0]}x{self.shape[1]} sparse matrix tensor of type '{self.data.dtype}'\n\twith {len(self.data)} stored elements in Compressed Sparse Row format{grad_str}>"
+        return f"<{self.shape[0]}x{self.shape[1]} sparse matrix tensor of type '{self.data.dtype}'\n\twith {len(self.data)} stored elements in Compressed Sparse Row format{dev_str}{grad_str}>"
 
     def clone(self):
         return SparseCSRTensor((self.data, self.indices, self.indptr), shape=self.shape)
@@ -946,3 +953,14 @@ class SparseCSRTensor(object):
     @property
     def T(self):
         return self.transpose()
+
+    @property
+    def device(self):
+        assert(self.data.device == self.indptr.device and self.indptr.device == self.indices.device)
+        return self.data.device
+
+    def to(self, device):
+        return SparseCSRTensor((self.data.to(device), self.indices.to(device), self.indptr.to(device)), self.shape)
+
+    def cpu(self):
+        return self.to('cpu')
