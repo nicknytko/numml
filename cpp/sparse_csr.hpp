@@ -54,13 +54,13 @@ FUNC_DEF(std::vector<torch::Tensor>,
          int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr);
 
 /* CSR Transpose */
-FUNC_DEF_NOCUDA(std::vector<torch::Tensor>,
-                csr_transpose_forward,
-                int A_rows, int A_columns,
-                torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+FUNC_DEF(std::vector<torch::Tensor>,
+         csr_transpose_forward,
+         int A_rows, int A_columns,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
 
-FUNC_DEF_NOCUDA(torch::Tensor,
-                csr_transpose_backward,
-                torch::Tensor grad_At, torch::Tensor At_to_A_idx);
+FUNC_DEF(torch::Tensor,
+         csr_transpose_backward,
+         torch::Tensor grad_At, torch::Tensor At_to_A_idx);
 
 #endif

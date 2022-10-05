@@ -31,7 +31,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
               torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
 
     /* grad_A = alpha * outer(grad_w, x) (*) mask(A) */
-    torch::Tensor grad_A = torch::zeros_like(A_data);
+    torch::Tensor grad_A = torch::empty_like(A_data);
     for (int row = 0; row < A_rows; row++) {
         for (int i = A_rowptr[row].item<int>(); i < A_rowptr[row + 1].item<int>(); i++) {
             int col = A_col_ind[i].item<int>();
@@ -88,9 +88,9 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     }
 
     /* Convert to CSR representation */
-    torch::Tensor C_data = torch::zeros(C_nnz, A_data.dtype());
-    torch::Tensor C_indices = torch::zeros(C_nnz, torch::TensorOptions().dtype(torch::kLong));
-    torch::Tensor C_indptr = torch::zeros(C_rows + 1, torch::TensorOptions().dtype(torch::kLong));
+    torch::Tensor C_data = torch::empty(C_nnz, A_data.dtype());
+    torch::Tensor C_indices = torch::empty(C_nnz, torch::TensorOptions().dtype(torch::kLong));
+    torch::Tensor C_indptr = torch::empty(C_rows + 1, torch::TensorOptions().dtype(torch::kLong));
 
     int C_i = 0;
     for (int C_row = 0; C_row < C_rows; C_row++) {
@@ -116,7 +116,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     int C_cols = B_cols;
 
     /** dA = (grad_C * B^T) (*) mask(A) */
-    torch::Tensor grad_A = torch::zeros_like(A_data);
+    torch::Tensor grad_A = torch::empty_like(A_data);
 
     /* First build a map from i,j coordinates to indices in the data */
     std::map<std::tuple<int, int>, float> A_mask;
@@ -200,9 +200,9 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     int nnz = A_indptr[A_rows].item<int>();
 
-    torch::Tensor At_data = torch::zeros(nnz);
+    torch::Tensor At_data = torch::empty(nnz);
     torch::Tensor At_indptr = torch::zeros(A_columns + 1, torch::TensorOptions().dtype(torch::kLong));
-    torch::Tensor At_indices = torch::zeros(nnz, torch::TensorOptions().dtype(torch::kLong));
+    torch::Tensor At_indices = torch::empty(nnz, torch::TensorOptions().dtype(torch::kLong));
 
     /* Compute number of nonzeros per column of A */
     for (int i = 0; i < nnz; i++) {
@@ -220,7 +220,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     /* Move data values into their correct spots */
     torch::Tensor At_row_acc = At_indptr.clone();
-    torch::Tensor At_to_A_idx = torch::zeros(nnz, torch::TensorOptions().dtype(torch::kLong));
+    torch::Tensor At_to_A_idx = torch::empty(nnz, torch::TensorOptions().dtype(torch::kLong));
     for (int row = 0; row < A_rows; row ++) {
         for (int i = A_indptr[row].item<int>(); i < A_indptr[row + 1].item<int>(); i++) {
             int column = A_indices[i].item<int>();
@@ -240,7 +240,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 FUNC_IMPL_CPU(torch::Tensor,
               csr_transpose_backward,
               torch::Tensor grad_At, torch::Tensor At_to_A_idx) {
-    torch::Tensor grad_A = torch::zeros_like(grad_At);
+    torch::Tensor grad_A = torch::empty_like(grad_At);
 
     for (int i = 0; i < grad_At.size(0); i++) {
         grad_A[At_to_A_idx[i].item<int>()] = grad_At[i];

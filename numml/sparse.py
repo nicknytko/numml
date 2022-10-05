@@ -601,11 +601,6 @@ class spcolscale(torch.autograd.Function):
         column = ctx.column
         shape = ctx.shape
 
-        # print('--spcolscale', row_start, column)
-        # print(A_data)
-        # print(A_col_ind)
-        # print(A_rowptr)
-
         grad_A = torch.clone(grad_B_data)
         kk_entry = None
         for row in range(row_start, shape[0]):
@@ -613,13 +608,9 @@ class spcolscale(torch.autograd.Function):
                 col = A_col_ind[i]
 
                 if col == column:
-                    #print('col == column at row', row)
                     if row == row_start:
                         kk_entry = i
-                        #print('found diagonal entry', i)
-                        #grad_A[i] = 0.
                     else:
-                        # print(A_data[kk_entry], grad_A[i])
                         grad_A[i] /= A_data[kk_entry]
                         grad_A[kk_entry] -= grad_B_data[i] * (A_data[i] / (A_data[kk_entry]) ** 2.)
                     break
@@ -650,8 +641,6 @@ def splu(A):
 
     # Helper to do the column scaling
     def apply_spcolscale(A, k):
-        # print(f'column scaling ({k}):')
-        # print(A.detach().to_dense())
         B_data, B_indices, B_indptr = spcolscale.apply(A.shape, A.data, A.indices, A.indptr, k, k)
         return SparseCSRTensor((B_data, B_indices, B_indptr), shape=A.shape)
 

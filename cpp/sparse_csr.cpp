@@ -62,14 +62,23 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
                    csr_transpose_forward,
                    int A_rows, int A_columns,
                    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
-    return csr_transpose_forward_cpu(A_rows, A_columns,
-                                     A_data, A_indices, A_indptr);
+    if (is_cuda(A_data)) {
+        return csr_transpose_forward_cuda(A_rows, A_columns,
+                                          A_data, A_indices, A_indptr);
+    } else {
+        return csr_transpose_forward_cpu(A_rows, A_columns,
+                                         A_data, A_indices, A_indptr);
+    }
 }
 
 FUNC_IMPL_DISPATCH(torch::Tensor,
                    csr_transpose_backward,
                    torch::Tensor grad_At, torch::Tensor At_to_A_idx) {
-    return csr_transpose_backward_cpu(grad_At, At_to_A_idx);
+    if (is_cuda(grad_At)) {
+        return csr_transpose_backward_cuda(grad_At, At_to_A_idx);
+    } else {
+        return csr_transpose_backward_cpu(grad_At, At_to_A_idx);
+    }
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
