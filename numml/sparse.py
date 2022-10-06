@@ -1,6 +1,7 @@
 import torch
 import numml_torch_cpp
 import numpy as np
+import scipy.sparse as scisp
 
 
 class coo_to_csr(torch.autograd.Function):
@@ -493,11 +494,11 @@ class tril(torch.autograd.Function):
                 L_to_A.append(i)
         L_indptr.append(len(L_data))
 
-        L_data = torch.Tensor(L_data)
-        L_indices = torch.Tensor(L_indices).long()
-        L_indptr = torch.Tensor(L_indptr).long()
+        L_data = torch.Tensor(L_data).to(A_data.device)
+        L_indices = torch.Tensor(L_indices).long().to(A_data.device)
+        L_indptr = torch.Tensor(L_indptr).long().to(A_data.device)
 
-        L_to_A = torch.Tensor(L_to_A).long()
+        L_to_A = torch.Tensor(L_to_A).long().to(A_data.device)
         ctx.save_for_backward(A_col_ind, A_rowptr, L_to_A)
         ctx.shape = shape
 
@@ -542,11 +543,11 @@ class triu(torch.autograd.Function):
                 U_to_A.append(i)
         U_indptr.append(len(U_data))
 
-        U_data = torch.Tensor(U_data)
-        U_indices = torch.Tensor(U_indices).long()
-        U_indptr = torch.Tensor(U_indptr).long()
+        U_data = torch.Tensor(U_data).to(A_data.device)
+        U_indices = torch.Tensor(U_indices).long().to(A_data.device)
+        U_indptr = torch.Tensor(U_indptr).long().to(A_data.device)
 
-        U_to_A = torch.Tensor(U_to_A).long()
+        U_to_A = torch.Tensor(U_to_A).long().to(A_data.device)
         ctx.save_for_backward(A_col_ind, A_rowptr, U_to_A)
         ctx.shape = shape
 
@@ -585,7 +586,7 @@ class spcolscale(torch.autograd.Function):
         if diag_entry == 0.:
             raise RuntimeError('Division by zero: matrix has explicit zero on diagonal.')
 
-        B_data[torch.logical_and(A_col_ind == column, torch.arange(len(A_data)) >= A_rowptr[row_start+1])] /= diag_entry
+        B_data[torch.logical_and(A_col_ind == column, torch.arange(len(A_data), device=A_data.device) >= A_rowptr[row_start+1])] /= diag_entry
 
         ctx.save_for_backward(A_data, A_col_ind, A_rowptr)
         ctx.row_start = row_start
@@ -714,6 +715,27 @@ class sptranspose(torch.autograd.Function):
 
 class SparseCSRTensor(object):
     def __init__(self, arg1, shape=None):
+        '''
+        Compressed Sparse Row matrix (tensor) with gradient support on
+        nonzero entries.
+
+        This constructor mimics that in SciPy's CSR matrix class, and
+        can be constructed in several ways:
+
+            csr_matrix(D)
+                with a dense tensor
+
+            csr_matrix(S)
+                with a sparse torch COO tensor or any SciPy sparse matrix
+
+            csr_matrix((data, (row_ind, col_ind)), shape=(M, N))
+                where data, row_ind, col_ind define the entries for a COO
+                representation
+
+            csr_matrix((data, indices, indptr), shape=(M, N))
+                constructing in the standard CSR representation
+        '''
+
         if isinstance(arg1, torch.Tensor):
             if arg1.layout == torch.sparse_coo:
                 # Input is torch sparse COO
@@ -733,14 +755,32 @@ class SparseCSRTensor(object):
                 self.shape = shape
             else:
                 self.shape = arg1.shape
+        elif isinstance(arg1, scisp.spmatrix):
+            arg_csr = arg1.tocsr()
+            self.data = torch.Tensor(arg_csr.data.copy(), dtype=float)
+            self.indices = torch.Tensor(arg_csr.indices.copy(), dtype=long)
+            self.indptr = torch.Tensor(arg_csr.indptr.copy(), dtype=long)
+            self.shape = arg_csr.shape
         elif isinstance(arg1, tuple):
             if len(arg1) == 3:
                 # Input is CSR: (data, indices, indptr)
                 assert(shape is not None)
 
-                self.data = torch.clone(arg1[0])
-                self.indices = torch.clone(arg1[1])
-                self.indptr = torch.clone(arg1[2])
+                if isinstance(arg1[0], np.ndarray):
+                    self.data = torch.Tensor(arg1[0].copy())
+                elif isinstance(arg1[1], torch.Tensor):
+                    self.data = torch.clone(arg1[0])
+
+                if isinstance(arg1[1], np.ndarray):
+                    self.indices = torch.Tensor(arg1[1].copy()).long()
+                elif isinstance(arg1[1], torch.Tensor):
+                    self.indices = torch.clone(arg1[1]).long()
+
+                if isinstance(arg1[2], np.ndarray):
+                    self.indptr = torch.Tensor(arg1[2].copy()).long()
+                elif isinstance(arg1[2], torch.Tensor):
+                    self.indptr = torch.clone(arg1[2]).long()
+
                 self.shape = shape
             elif len(arg1) == 2:
                 # Input is COO: (data, (row_ind, col_ind))
@@ -758,6 +798,24 @@ class SparseCSRTensor(object):
                             torch.tensor(0.).to(x.device), torch.zeros(self.shape[0]).to(x.device))
 
     def solve_triangular(self, upper, unit, b):
+        '''
+        Solve this (triangular) system for some right-hand-side vector.
+
+        Parameters
+        ----------
+        upper : bool
+          Is this matrix upper triangular?
+        unit : bool
+          Assume unit diagonal?  If true, will ignore diagonal entries.
+        b : torch.Tensor
+          Right-hand-side vector
+
+        Returns
+        -------
+        x : torch.Tensor
+          Solution to the matrix equation Ax = b, where A is triangular.
+        '''
+
         return sstrsv(upper, unit, self.shape, self.data, self.indices, self.indptr, b)
 
     def spgemm(self, othr):
@@ -785,16 +843,75 @@ class SparseCSRTensor(object):
             raise RuntimeError(f'invalid tensor found for sparse multiply: mode {dims} tensor found.')
 
     def to_dense(self):
+        '''
+        Converts the CSR representation to a dense Torch tensor.
+        Will propagate gradients to/from nonzero entries if they exist.
+
+        Returns
+        -------
+        dense : torch.Tensor
+          Dense output
+        '''
+
         X = torch.zeros(self.shape)
         for row_i in range(len(self.indptr) - 1):
             for data_j in range(self.indptr[row_i], self.indptr[row_i + 1]):
                 X[row_i, self.indices[data_j]] = self.data[data_j]
         return X
 
+    def to_coo(self):
+        '''
+        Converts the CSR reprsentation to Torch's built-in sparse COO tensor format.
+        Will propagate gradients on the data if they exist.
+
+        Returns
+        -------
+        coo : torch.Tensor
+          Sparse COO output
+        '''
+
+        # take advantage of the fact that sorted COO and CSR have entries in the same order
+        row_i = torch.empty(self.nnz, dtype=long)
+        for i in range(self.shape[0]):
+            row_i[self.indptr[i]:self.indptr[i+1]] = i
+        return torch.sparse_coo_tensor(torch.row_stack((row_i, self.indices)), self.data, self.shape)
+
+    def to_scipy_csr(self):
+        '''
+        Converts the Torch CSR representation to SciPy sparse CSR.
+        Gradient information on the data will be lost, if it exists.
+
+        Returns
+        -------
+        csr : scipy.sparse.csr_matrix
+          SciPy sparse CSR output
+        '''
+
+        return scisp.csr_matrix((self.data.cpu().detach().double().numpy(),
+                                 self.indices.cpu().numpy(), self.indptr.cpu().numpy()), self.shape)
+
     def sum(self):
+        '''
+        Computes the sum over all entries.
+
+        Returns
+        -------
+        sum : float
+          Summation over nonzero data entries
+        '''
+
         return self.data.sum()
 
     def abs(self):
+        '''
+        Takes the absolute value of each entry, and returns the output as a new tensor.
+
+        Returns
+        -------
+        abs : SparseCSRTensor
+          Tensor whose entries have been absolute value-d
+        '''
+
         return SparseCSRTensor((torch.abs(self.data), self.indices, self.indptr), self.shape)
 
     def __add__(self, othr):
@@ -853,6 +970,16 @@ class SparseCSRTensor(object):
         return f"<{self.shape[0]}x{self.shape[1]} sparse matrix tensor of type '{self.data.dtype}'\n\twith {len(self.data)} stored elements in Compressed Sparse Row format{dev_str}{grad_str}>"
 
     def clone(self):
+        '''
+        Create a copy of this tensor.  Mutations made to the output tensor will not affect
+        the original tensor.
+
+        Returns
+        -------
+        cloned : SparseCSRTensor
+          Copied tensor.
+        '''
+
         return SparseCSRTensor((self.data, self.indices, self.indptr), shape=self.shape)
 
     def copy(self):
@@ -877,7 +1004,7 @@ class SparseCSRTensor(object):
     @property
     def nnz(self):
         '''
-        Number of stored values, including explicit zeros
+        Number of stored values, including explicit zeros if they exist.
         '''
         return len(self.data)
 
@@ -936,6 +1063,17 @@ class SparseCSRTensor(object):
         return SparseCSRTensor((self.data.detach(), self.indices, self.indptr), self.shape)
 
     def transpose(self):
+        '''
+        Take the transpose of this tensor.
+
+        Note: the transposition is done eagerly.  There is no intermediate CSC format that is returned.
+
+        Returns
+        -------
+        At : SparseCSRTensor
+          Transposed version of the tensor.
+        '''
+
         At_shape, At_data, At_indices, At_indptr = sptranspose.apply(self.shape, self.data, self.indices, self.indptr)
         return SparseCSRTensor((At_data, At_indices, At_indptr), At_shape)
 
