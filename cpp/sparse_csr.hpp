@@ -63,4 +63,17 @@ FUNC_DEF(torch::Tensor,
          csr_transpose_backward,
          torch::Tensor grad_At, torch::Tensor At_to_A_idx);
 
+/* Sparse linear combination */
+FUNC_DEF(std::vector<torch::Tensor>,
+         splincomb_forward,
+         int rows, int cols,
+         torch::Tensor alpha, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr);
+
+FUNC_DEF(std::vector<torch::Tensor>,
+         splincomb_backward,
+         int rows, int cols,
+         torch::Tensor alpha, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr,
+         torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr);
 #endif

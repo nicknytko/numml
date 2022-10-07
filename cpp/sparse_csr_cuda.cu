@@ -421,7 +421,7 @@ void lexsort_coo_ijv(torch::Tensor& Bhat_I,
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
     /* Sort first by columns... */
-    torch::Tensor argsort = Bhat_J.argsort(false);
+    torch::Tensor argsort = std::get<1>(Bhat_J.sort(false, -1, false));
     torch::Tensor i_temp = torch::empty_like(Bhat_I);
     torch::Tensor j_temp = torch::empty_like(Bhat_J);
     torch::Tensor v_temp = torch::empty_like(Bhat_V);
@@ -439,8 +439,13 @@ void lexsort_coo_ijv(torch::Tensor& Bhat_I,
     });
 
     /* Now, stable sort on rows.
-       Do this awful reshaping because Torch's stable argsort is bugged on 1.12.1 */
-    argsort = i_temp.reshape({1, -1}).argsort(true).flatten();
+
+       Rant incoming:
+       Torch's (arg)sort interface is broke on 1.12.1, so we perform this awful incantation.
+       Specifically, we can't even call argsort with stable, so we have to call
+       sort and grab the second argument, making sure to reshape inputs because for some
+       reason it breaks on flat vectors!! */
+    argsort = std::get<1>(i_temp.reshape({1, -1}).sort(true, -1, false)).flatten();
 
     /* ...and again permute entries into correct spots */
     AT_DISPATCH_FLOATING_TYPES(Bhat_V.type(), "lexsort_coo_ijv", [&] {

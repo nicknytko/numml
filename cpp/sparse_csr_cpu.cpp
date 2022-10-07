@@ -32,7 +32,6 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     /* grad_A = alpha * outer(grad_w, x) (*) mask(A) */
     torch::Tensor grad_A = torch::empty_like(A_data);
-    #pragma omp parallel for
     for (int row = 0; row < A_rows; row++) {
         for (int i = A_rowptr[row].item<int>(); i < A_rowptr[row + 1].item<int>(); i++) {
             int col = A_col_ind[i].item<int>();
@@ -248,4 +247,144 @@ FUNC_IMPL_CPU(torch::Tensor,
     }
 
     return grad_A;
+}
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              splincomb_forward,
+              int rows, int cols,
+              torch::Tensor alpha, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
+
+    auto int_tens_opts = torch::TensorOptions()
+        .dtype(torch::kInt64);
+        // .device(A_data.device().type(), A_data.device().index());
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype());
+        // .device(A_data.device().type(), A_data.device().index());
+
+    std::vector<float> C_data;
+    std::vector<int64_t> C_indices;
+    std::vector<int64_t> C_indptr;
+
+    /* Reserve a conservative guess for the nonzeros */
+    C_data.reserve(std::max(A_data.size(0), B_data.size(0)));
+    C_indices.reserve(std::max(A_data.size(0), B_data.size(0)));
+    C_indptr.reserve(rows + 1);
+
+    for (int64_t row = 0; row < rows; row++) {
+        /* Indptr for this row is where we are in data array. */
+        C_indptr.push_back(C_data.size());
+
+        int64_t i_A = A_indptr[row].item<int64_t>();
+        int64_t i_B = B_indptr[row].item<int64_t>();
+
+        int64_t end_A = A_indptr[row + 1].item<int64_t>();
+        int64_t end_B = B_indptr[row + 1].item<int64_t>();
+
+        /* Merge the row of A and B */
+        while (i_A < end_A && i_B < end_B) {
+            int64_t col_A = A_indices[i_A].item<int64_t>();
+            int64_t col_B = B_indices[i_B].item<int64_t>();
+
+            if (col_A < col_B) {
+                C_data.push_back((alpha * A_data[i_A]).item<float>());
+                C_indices.push_back(col_A);
+                i_A++;
+            } else if (col_A > col_B) {
+                C_data.push_back((beta * B_data[i_B]).item<float>());
+                C_indices.push_back(col_B);
+                i_B++;
+            } else { /* we hit the same row-column pair in both matrices */
+                C_data.push_back((alpha * A_data[i_A] + beta * B_data[i_B]).item<float>());
+                C_indices.push_back(col_A);
+                i_A++;
+                i_B++;
+            }
+        }
+
+        /* Exhausted shared indices, now we add the rest of the row of A or B */
+        while (i_A < end_A) {
+            C_data.push_back((alpha * A_data[i_A]).item<float>());
+            C_indices.push_back(A_indices[i_A].item<int64_t>());
+            i_A++;
+        }
+        while (i_B < end_B) {
+            C_data.push_back((beta * B_data[i_B]).item<float>());
+            C_indices.push_back(B_indices[i_B].item<int64_t>());
+            i_B++;
+        }
+    }
+
+    C_indptr.push_back(C_data.size());
+
+    torch::Tensor C_data_tens = torch::from_blob(C_data.data(), {C_data.size()}, scalar_tens_opts).clone().to(A_data.device());
+    torch::Tensor C_indices_tens = torch::from_blob(C_indices.data(), {C_indices.size()}, int_tens_opts).clone().to(A_data.device());
+    torch::Tensor C_indptr_tens = torch::from_blob(C_indptr.data(), {C_indptr.size()}, int_tens_opts).clone().to(A_data.device());
+
+    return {
+        C_data_tens,
+        C_indices_tens,
+        C_indptr_tens
+    };
+}
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              splincomb_backward,
+              int rows, int cols,
+              torch::Tensor alpha, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr,
+              torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr) {
+
+    /* grad_A = alpha * grad_c (*) mask(A) */
+    torch::Tensor grad_A = torch::empty_like(A_data);
+    for (int64_t row = 0; row < rows; row++) {
+        int64_t A_i = A_indptr[row].item<int64_t>();
+        int64_t C_i = C_indptr[row].item<int64_t>();
+
+        int64_t A_end = A_indptr[row + 1].item<int64_t>();
+        int64_t C_end = C_indptr[row + 1].item<int64_t>();
+
+        while (A_i < A_end && C_i < C_end) {
+            int64_t A_col = A_indices[A_i].item<int64_t>();
+            int64_t C_col = C_indices[C_i].item<int64_t>();
+
+            if (A_col < C_col) {
+                A_i++;
+            } else if (A_col > C_col) {
+                C_i++;
+            } else {
+                grad_A[A_i] = (grad_C_data[C_i] * alpha).item();
+                A_i++;
+                C_i++;
+            }
+        }
+    }
+
+    /* grad_B = beta * grad_c (*) mask(B) */
+    torch::Tensor grad_B = torch::empty_like(B_data);
+    for (int64_t row = 0; row < rows; row++) {
+        int64_t B_i = B_indptr[row].item<int64_t>();
+        int64_t C_i = C_indptr[row].item<int64_t>();
+
+        int64_t B_end = B_indptr[row + 1].item<int64_t>();
+        int64_t C_end = C_indptr[row + 1].item<int64_t>();
+
+        while (B_i < B_end && C_i < C_end) {
+            int64_t B_col = B_indices[B_i].item<int64_t>();
+            int64_t C_col = C_indices[C_i].item<int64_t>();
+
+            if (B_col < C_col) {
+                B_i++;
+            } else if (B_col > C_col) {
+                C_i++;
+            } else {
+                grad_B[B_i] = (grad_C_data[C_i] * beta).item();
+                B_i++;
+                C_i++;
+            }
+        }
+    }
+
+    return {grad_A, grad_B};
 }

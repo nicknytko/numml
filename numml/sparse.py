@@ -11,7 +11,7 @@ def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
         row_ind = row_ind[col_sort]
         col_ind = col_ind[col_sort]
 
-        _, row_sort = torch.sort(col_ind, stable=True)
+        _, row_sort = torch.sort(row_ind, stable=True)
         values = values[row_sort]
         row_ind = row_ind[row_sort]
         col_ind = col_ind[row_sort]
@@ -269,55 +269,9 @@ class splincomb(torch.autograd.Function):
                 alpha, A_data, A_col_ind, A_rowptr,
                 beta,  B_data, B_col_ind, B_rowptr):
 
-        C_data = []
-        C_col_ind = []
-        C_rowptr = []
-
-        rows, cols = shape
-
-        for row in range(rows):
-            C_rowptr.append(len(C_data))
-
-            i_A = (A_rowptr[row]).item()
-            i_B = (B_rowptr[row]).item()
-
-            end_A = (A_rowptr[row + 1]).item()
-            end_B = (B_rowptr[row + 1]).item()
-
-            # Merge row of A and B
-            while i_A < end_A and i_B < end_B:
-                col_A = A_col_ind[i_A]
-                col_B = B_col_ind[i_B]
-
-                if col_A < col_B:
-                    C_data.append(alpha * A_data[i_A])
-                    C_col_ind.append(col_A)
-                    i_A += 1
-                elif col_A > col_B:
-                    C_data.append(beta * B_data[i_B])
-                    C_col_ind.append(col_B)
-                    i_B += 1
-                else: # col_A == col_B
-                    C_data.append(alpha * A_data[i_A] + beta * B_data[i_B])
-                    C_col_ind.append(col_A)
-                    i_A += 1
-                    i_B += 1
-
-            # Exhausted shared indices, now add rest of row of A/B
-            while i_A < end_A:
-                C_data.append(alpha * A_data[i_A])
-                C_col_ind.append(A_col_ind[i_A])
-                i_A += 1
-            while i_B < end_B:
-                C_data.append(beta * B_data[i_B])
-                C_col_ind.append(B_col_ind[i_B])
-                i_B += 1
-
-        C_rowptr.append(len(C_data))
-
-        C_data = torch.Tensor(C_data)
-        C_col_ind = torch.Tensor(C_col_ind).long()
-        C_rowptr = torch.Tensor(C_rowptr).long()
+        C_data, C_col_ind, C_rowptr = numml_torch_cpp.splincomb_forward(shape[0], shape[1],
+                                                                        alpha, A_data, A_col_ind, A_rowptr,
+                                                                        beta,  B_data, B_col_ind, B_rowptr)
 
         ctx.save_for_backward(alpha, A_data, A_col_ind, A_rowptr, beta, B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr)
         ctx.shape = shape
@@ -330,49 +284,10 @@ class splincomb(torch.autograd.Function):
         alpha, A_data, A_col_ind, A_rowptr, beta, B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr = ctx.saved_tensors
         shape = ctx.shape
 
-        # d_da = alpha * grad_c (*) mask(A)
-        grad_A = torch.zeros_like(A_data)
-        for row in range(shape[0]):
-            A_i = (A_rowptr[row]).item()
-            C_i = (C_rowptr[row]).item()
-
-            A_end = (A_rowptr[row+1]).item()
-            C_end = (C_rowptr[row+1]).item()
-
-            while A_i < A_end and C_i < C_end:
-                A_col = A_col_ind[A_i]
-                C_col = C_col_ind[C_i]
-
-                if A_col < C_col:
-                    A_i += 1
-                elif A_col > C_col:
-                    C_i += 1
-                else:
-                    grad_A[A_i] = grad_C_data[C_i] * alpha
-                    A_i += 1
-                    C_i += 1
-
-        # d_db = beta * grad_c (*) mask(B)
-        grad_B = torch.zeros_like(B_data)
-        for row in range(shape[0]):
-            B_i = (B_rowptr[row]).item()
-            C_i = (C_rowptr[row]).item()
-
-            B_end = (B_rowptr[row+1]).item()
-            C_end = (C_rowptr[row+1]).item()
-
-            while B_i < B_end and C_i < C_end:
-                B_col = B_col_ind[B_i]
-                C_col = C_col_ind[C_i]
-
-                if B_col < C_col:
-                    B_i += 1
-                elif B_col > C_col:
-                    C_i += 1
-                else:
-                    grad_B[B_i] = grad_C_data[C_i] * beta
-                    B_i += 1
-                    C_i += 1
+        grad_A, grad_B = numml_torch_cpp.splincomb_backward(shape[0], shape[1],
+                                                            alpha, A_data, A_col_ind, A_rowptr,
+                                                            beta,  B_data, B_col_ind, B_rowptr,
+                                                            grad_C_data, C_col_ind, C_rowptr)
 
         return (None, # shape
                 torch.sum(A_data), # alpha
