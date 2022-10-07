@@ -19,6 +19,8 @@
 
 #define tensor_acc(T, type) (T).packed_accessor64<type, 1, torch::RestrictPtrTraits>()
 
+const int threads_per_block = 512;
+
 /* Sparse GEMV */
 
 /**
@@ -60,7 +62,6 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
     torch::Tensor Ax = torch::empty({A_rows}, options);
-    const int threads_per_block = 512;
     const int threads = A_rows;
     const dim3 blocks((threads + threads_per_block - 1) / threads_per_block, 1);
 
@@ -154,7 +155,6 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
                torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
 
-    const int threads_per_block = 512;
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
     /* Gradient wrt A */
@@ -418,8 +418,6 @@ void lexsort_coo_ijv(torch::Tensor& Bhat_I,
                      torch::Tensor& Bhat_J,
                      torch::Tensor& Bhat_V) {
 
-    const int threads_per_block = 512;
-
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
     /* Sort first by columns... */
@@ -440,8 +438,9 @@ void lexsort_coo_ijv(torch::Tensor& Bhat_I,
             Bhat_total_nnz, tensor_acc(Bhat_V, scalar_t), tensor_acc(v_temp, scalar_t), tensor_acc(argsort, int64_t), true);
     });
 
-    /* Now, stable sort on rows... */
-    argsort = i_temp.argsort(true);
+    /* Now, stable sort on rows.
+       Do this awful reshaping because Torch's stable argsort is bugged on 1.12.1 */
+    argsort = i_temp.reshape({1, -1}).argsort(true).flatten();
 
     /* ...and again permute entries into correct spots */
     AT_DISPATCH_FLOATING_TYPES(Bhat_V.type(), "lexsort_coo_ijv", [&] {
@@ -470,7 +469,6 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
     const int C_rows = A_rows;
     const int C_cols = B_cols;
-    const int threads_per_block = 512;
 
     auto int_tens_opts = torch::TensorOptions()
         .dtype(torch::kInt64)
@@ -771,7 +769,6 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
 
     const int C_rows = A_rows;
     const int C_cols = B_cols;
-    const int threads_per_block = 512;
 
     auto int_tens_opts = torch::TensorOptions()
         .dtype(torch::kInt64)
@@ -925,7 +922,6 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
        https://github.com/scipy/scipy/blob/3b36a574dc657d1ca116f6e230be694f3de31afc/scipy/sparse/sparsetools/csr.h#L380 */
 
     const int64_t nnz = A_indptr[A_rows].item<int>();
-    const int threads_per_block = 512;
 
     auto int_tens_opts = torch::TensorOptions()
         .dtype(torch::kInt64)
@@ -967,8 +963,6 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
 FUNC_IMPL_CUDA(torch::Tensor,
                csr_transpose_backward,
                torch::Tensor grad_At, torch::Tensor At_to_A_idx) {
-
-    const int threads_per_block = 512;
 
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
     torch::Tensor grad_A = torch::empty_like(grad_At);

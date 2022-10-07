@@ -3,43 +3,26 @@ import numml_torch_cpp
 import numpy as np
 import scipy.sparse as scisp
 
+def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
+    if sort:
+        _, col_sort = torch.sort(col_ind)
 
-class coo_to_csr(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, values, row_ind, col_ind, shape, sorted=False):
-        data = torch.clone(values).detach()
-        dtype = data.dtype
-        N = len(row_ind)
+        values = values[col_sort]
+        row_ind = row_ind[col_sort]
+        col_ind = col_ind[col_sort]
 
-        # Sort COO representation by rows, then columns.  We save the inverse of the
-        # sort so that we can propagate gradients.
-        argsort = torch.Tensor(np.lexsort((col_ind, row_ind))).long()
-        argsort_inv = torch.empty(N, dtype=torch.long)
-        argsort_inv[argsort] = torch.arange(N)
+        _, row_sort = torch.sort(col_ind, stable=True)
+        values = values[row_sort]
+        row_ind = row_ind[row_sort]
+        col_ind = col_ind[row_sort]
 
-        # create rowpointer indices as cumulative sum of nonzeros in each row
-        rowsort = row_ind[argsort]
-        rowptr = torch.zeros(shape[0] + 1, dtype=dtype)
+    nnz = torch.zeros(shape[0], dtype=torch.long, device=values.device)
+    for i in range(shape[0]):
+        nnz[i] = (row_ind == i).sum()
+    cumsum = torch.cumsum(nnz, 0)
+    cumsum = torch.cat((torch.tensor([0], device=values.device), cumsum))
 
-        nnz_per_row = torch.zeros(shape[0])
-        for i in range(N):
-            nnz_per_row[row_ind[i]] += 1
-
-        nnz = len(row_ind)
-        cumsum = 0
-        for i in range(shape[0]):
-            rowptr[i] = cumsum
-            cumsum += nnz_per_row[i]
-        rowptr[-1] = nnz
-
-        ctx.save_for_backward(argsort_inv, row_ind, col_ind)
-        return data, col_ind[argsort], rowptr.long()
-
-    @staticmethod
-    def backward(ctx, data, col_ind, rowptr):
-        argsort_inv, row_ind, col_ind = ctx.saved_tensors
-        return data[argsort_inv], None, None, None
-
+    return values.float(), col_ind, cumsum
 
 class spgemv(torch.autograd.Function):
     '''
@@ -743,13 +726,13 @@ class SparseCSRTensor(object):
                 arg1 = arg1.coalesce()
                 vals = arg1.values()
                 rows, cols = arg1.indices()
-                self.data, self.indices, self.indptr = coo_to_csr.apply(vals, rows, cols, arg1.shape)
+                self.data, self.indices, self.indptr = coo_to_csr(vals, rows, cols, arg1.shape, sort=True)
             else:
                 # Input is torch dense
 
                 rows, cols = torch.nonzero(arg1).T
                 nz = arg1[rows, cols]
-                self.data, self.indices, self.indptr = coo_to_csr.apply(nz, rows, cols, arg1.shape)
+                self.data, self.indices, self.indptr = coo_to_csr(nz, rows, cols, arg1.shape, sort=True)
 
             if shape is not None:
                 self.shape = shape
@@ -757,9 +740,9 @@ class SparseCSRTensor(object):
                 self.shape = arg1.shape
         elif isinstance(arg1, scisp.spmatrix):
             arg_csr = arg1.tocsr()
-            self.data = torch.Tensor(arg_csr.data.copy(), dtype=float)
-            self.indices = torch.Tensor(arg_csr.indices.copy(), dtype=long)
-            self.indptr = torch.Tensor(arg_csr.indptr.copy(), dtype=long)
+            self.data = torch.Tensor(arg_csr.data.copy()).float()
+            self.indices = torch.Tensor(arg_csr.indices.copy()).long()
+            self.indptr = torch.Tensor(arg_csr.indptr.copy()).long()
             self.shape = arg_csr.shape
         elif isinstance(arg1, tuple):
             if len(arg1) == 3:
@@ -787,7 +770,7 @@ class SparseCSRTensor(object):
                 assert(shape is not None)
 
                 data, (rows, cols) = arg1
-                self.data, self.indices, self.indptr = coo_to_csr.apply(data, rows, cols, shape)
+                self.data, self.indices, self.indptr = coo_to_csr(data, rows, cols, shape)
                 self.shape = shape
         else:
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
@@ -853,7 +836,7 @@ class SparseCSRTensor(object):
           Dense output
         '''
 
-        X = torch.zeros(self.shape)
+        X = torch.zeros(self.shape, device=self.data.device)
         for row_i in range(len(self.indptr) - 1):
             for data_j in range(self.indptr[row_i], self.indptr[row_i + 1]):
                 X[row_i, self.indices[data_j]] = self.data[data_j]
@@ -914,26 +897,39 @@ class SparseCSRTensor(object):
 
         return SparseCSRTensor((torch.abs(self.data), self.indices, self.indptr), self.shape)
 
-    def __add__(self, othr):
-        assert(self.shape == othr.shape)
+    def _isscalar(x):
+        return (isinstance(x, float) or
+                isinstance(x, int) or
+                (isinstance(x, torch.Tensor) and len(x.shape) == 0))
 
-        C = splincomb.apply(self.shape,
-                            torch.tensor(1.), self.data, self.indices, self.indptr,
-                            torch.tensor(1.), othr.data, othr.indices, othr.indptr)
-        return SparseCSRTensor(C, self.shape)
+    def __add__(self, othr):
+        if SparseCSRTensor._isscalar(othr):
+            return SparseCSRTensor((self.data + othr, self.indices, self.indptr), shape=self.shape)
+        elif isinstance(othr, SparseCSRTensor):
+            assert(self.shape == othr.shape)
+
+            C = splincomb.apply(self.shape,
+                                torch.tensor(1.), self.data, self.indices, self.indptr,
+                                torch.tensor(1.), othr.data, othr.indices, othr.indptr)
+            return SparseCSRTensor(C, self.shape)
+        else:
+            raise RuntimeError(f'Unknown type for sparse tensor addition: {type(othr)}.')
 
     def __sub__(self, othr):
-        assert(self.shape == othr.shape)
+        if SparseCSRTensor._isscalar(othr):
+            return SparseCSRTensor((self.data + othr, self.indices, self.indptr), shape=self.shape)
+        elif isinstance(othr, SparseCSRTensor):
+            assert(self.shape == othr.shape)
 
-        C = splincomb.apply(self.shape,
-                            torch.tensor(1.) , self.data, self.indices, self.indptr,
-                            torch.tensor(-1.), othr.data, othr.indices, othr.indptr)
-        return SparseCSRTensor(C, self.shape)
+            C = splincomb.apply(self.shape,
+                                torch.tensor(1.) , self.data, self.indices, self.indptr,
+                                torch.tensor(-1.), othr.data, othr.indices, othr.indptr)
+            return SparseCSRTensor(C, self.shape)
+        else:
+            raise RuntimeError(f'Unknown type for sparse tensor addition: {type(othr)}.')
 
     def __mul__(self, other):
-        if (isinstance(other, float) or
-            isinstance(other, int) or
-            (isinstance(other, torch.Tensor) and len(other.shape) == 0)):
+        if SparseCSRTensor._isscalar(other):
             return SparseCSRTensor((self.data * other, self.indices, self.indptr), shape=self.shape)
         elif isinstance(other, torch.Tensor) and len(torch.squeeze(other).shape) == 2:
             raise RuntimeError('Element-wise hadamard product not implemented')
@@ -944,9 +940,7 @@ class SparseCSRTensor(object):
         return self.__mul__(other)
 
     def __rtruediv__(self, other):
-        if (isinstance(other, float) or
-            isinstance(other, int) or
-            (isinstance(other, torch.Tensor) and len(other.shape) == 0)):
+        if SparseCSRTensor._isscalar(other):
             return SparseCSRTensor((other / self.data, self.indices, self.indptr), shape=self.shape)
         else:
             raise RuntimeError(f'Unknown type for right-division: {type(other)}.')

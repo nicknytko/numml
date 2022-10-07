@@ -32,6 +32,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     /* grad_A = alpha * outer(grad_w, x) (*) mask(A) */
     torch::Tensor grad_A = torch::empty_like(A_data);
+    #pragma omp parallel for
     for (int row = 0; row < A_rows; row++) {
         for (int i = A_rowptr[row].item<int>(); i < A_rowptr[row + 1].item<int>(); i++) {
             int col = A_col_ind[i].item<int>();
