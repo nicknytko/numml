@@ -611,6 +611,11 @@ class sptranspose(torch.autograd.Function):
                 None) # A_indptr
 
 
+class spmdm(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr, X):
+
+
 class SparseCSRTensor(object):
     def __init__(self, arg1, shape=None):
         '''

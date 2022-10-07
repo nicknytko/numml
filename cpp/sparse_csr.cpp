@@ -105,6 +105,26 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
                                   grad_C_data, C_indices, C_indptr);
 }
 
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   spmdm_forward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   torch::Tensor B) {
+
+    return spmdm_forward_cpu(A_rows, A_cols,
+                             A_data, A_indices, A_indptr, B);
+}
+
+FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+                   spmdm_backward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   torch::Tensor B, torch::Tensor grad_C) {
+
+    return spmdm_backward_cpu(A_rows, A_cols,
+                              A_data, A_indices, A_indptr, B, grad_C);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
     m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
@@ -117,4 +137,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("splincomb_forward", &splincomb_forward, "Sparse linear combination forward");
     m.def("splincomb_backward", &splincomb_backward, "Sparse linear combination backward");
+
+    m.def("spmdm_forward", &spmdm_forward, "Sparse times dense matrix forward");
+    m.def("spmdm_backward", &spmdm_backward, "Sparse times dense matrix backward");
+
 }

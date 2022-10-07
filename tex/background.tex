@@ -145,7 +145,7 @@ which is $0$ at every other index.  When doing the backward pass (and assuming $
 showing that while the generalized Jacobian is a notational convenience, it is often unnecessary and indeed can be expensive in memory usage to actually form in practice.  Instead, for functions like these we are interested in computing \textit{the action} of multiplying the gradient by the Jacobian.
 
 \section{Gradient Derivations}
-\subsection{GEMV}
+\subsection{Spmv Product}
 This is implementing the basic linear algebra operation
 \begin{equation}
   \vec{w} = \alpha \mat{A}\vec{x} + \beta \vec{y},
@@ -173,12 +173,12 @@ Applying the chain rule to some function $f : \mathbb{R}^n \to \mathbb{R}$ like 
   \frac{\partial z}{\partial \beta} = \sum_k \frac{\partial z}{\partial w_k} \frac{\partial w_k}{\partial \beta} = \sum_k \frac{\partial z}{\partial w_k} y_k &\implies \gradfn{\beta}{z} = \gradfn{\vec{w}}{z}^T \vec{y}.
 \end{align}
 
-\subsection{SPGEMM}
+\subsection{Spmm Product}
 This will go through the derivation of the sparse matrix-matrix product defined by
 \begin{equation}
   \mat{C} = \mat{A}\mat{B},
 \end{equation}
-where $\mat{A} \in \mathbb{R}^{m \times n}, \mat{B} \in \mathbb{R}^{n \times o}, \mat{C} \in \mathbb{R}^{m \times o}$.
+where $\mat{A} \in \mathbb{R}^{m \times n}, \mat{B} \in \mathbb{R}^{n \times o}, \mat{C} \in \mathbb{R}^{m \times o}$, and one or both of $\mat{A}, \mat{B}$ are sparse.
 
 The forward pass is trivially defined (entrywise) like
 \begin{equation}
@@ -195,6 +195,7 @@ Applying the chain rule to some function $f : \mathbb{R}^{m \times o} \to \mathb
   \frac{\partial z}{\partial b_{ij}} = \sum_{k=1}^m \sum_{l=1}^o \frac{\partial z}{\partial c_{kl}} \frac{\partial c_{kl}}{\partial b_{ij}} = \sum_{k=1}^m \frac{\partial z}{\partial c_{kj}} a_{ki} &\implies \gradfn{\mat{B}}{z} = \left(\mat{A}^T \gradfn{\mat{C}}{z}\right) \odot \mask{\mat{B}}.
 \end{align}
 
+In the case where one of $\mat{A}$ or $\mat{B}$ are dense, their respective mask becomes dense as well, i.e. $\left[\mask{\mat{X}}\right]_{ij}=1$ for $\mat{X}$ equal to $\mat{A}$ or $\mat{B}$.
 \subsection{Linear Combination of Matrices}
 Let $\mat{C}$ be defined as the linear combination of two matrices $\mat{A}, \mat{B} \in \mathbb{R}^{n \times m}$ like
 \begin{equation}
