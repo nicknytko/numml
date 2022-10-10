@@ -611,9 +611,19 @@ class sptranspose(torch.autograd.Function):
                 None) # A_indptr
 
 
-class spmdm(torch.autograd.Function):
+class spdmm(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, A_shape, A_data, A_indices, A_indptr, X):
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr, B):
+        ctx.save_for_backward(A_data, A_indices, A_indptr, B)
+        ctx.A_shape = A_shape
+
+        C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
+                                          A_data, A_indices, A_indptr, B)
+
+        return C
+
+    @staticmethod
+
 
 
 class SparseCSRTensor(object):
