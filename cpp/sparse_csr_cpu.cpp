@@ -318,9 +318,9 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     C_indptr.push_back(C_data.size());
 
-    torch::Tensor C_data_tens = torch::from_blob(C_data.data(), {C_data.size()}, scalar_tens_opts).clone().to(A_data.device());
-    torch::Tensor C_indices_tens = torch::from_blob(C_indices.data(), {C_indices.size()}, int_tens_opts).clone().to(A_data.device());
-    torch::Tensor C_indptr_tens = torch::from_blob(C_indptr.data(), {C_indptr.size()}, int_tens_opts).clone().to(A_data.device());
+    torch::Tensor C_data_tens = torch::from_blob(C_data.data(), {static_cast<int64_t>(C_data.size())}, scalar_tens_opts).clone().to(A_data.device());
+    torch::Tensor C_indices_tens = torch::from_blob(C_indices.data(), {static_cast<int64_t>(C_indices.size())}, int_tens_opts).clone().to(A_data.device());
+    torch::Tensor C_indptr_tens = torch::from_blob(C_indptr.data(), {static_cast<int64_t>(C_indptr.size())}, int_tens_opts).clone().to(A_data.device());
 
     return {
         C_data_tens,
