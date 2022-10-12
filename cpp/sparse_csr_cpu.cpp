@@ -388,3 +388,74 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     return {grad_A, grad_B};
 }
+
+FUNC_IMPL_CPU(torch::Tensor,
+                   spdmm_forward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   torch::Tensor B) {
+
+    const int B_rows = B.size(0);
+    const int B_cols = B.size(1);
+
+    const int C_rows = A_rows;
+    const int C_cols = B_cols;
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+    torch::Tensor C = torch::empty({C_rows, C_cols}, scalar_tens_opts);
+
+    for (int64_t row = 0; row < C_rows; row++) {
+        for (int64_t col = 0; col < C_cols; col++) {
+            float cij = 0.;
+
+            for (int64_t row_i = A_indptr[row].item<int64_t>();
+                 row_i < A_indptr[row+1].item<int64_t>(); row_i++) {
+                int64_t k = A_indices[row_i].item<int64_t>();
+                cij += (A_data[row_i] * B.index({k, col})).item<float>();
+            }
+
+            C.index_put_({row, col}, cij);
+        }
+    }
+
+    return C;
+}
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+                   spdmm_backward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   torch::Tensor B, torch::Tensor grad_C) {
+
+    /* grad_A = (grad_C * B^T) (*) mask(A) */
+    torch::Tensor grad_A = torch::empty_like(A_data);
+
+    for (int64_t row = 0; row < A_rows; row++) {
+        for (int64_t row_i = A_indptr[row].item<int64_t>();
+             row_i < A_indptr[row + 1].item<int64_t>(); row_i++) {
+            int64_t col = A_indices[row_i].item<int64_t>();
+            float aij = 0.;
+
+            for (int64_t k = 0; k < B.size(1); k++) {
+                aij += (grad_C.index({row, k}) * B.index({col, k})).item<float>();
+            }
+
+            grad_A[row_i] = aij;
+        }
+    }
+
+    /* grad_B = (A^T grad_C) */
+    torch::Tensor grad_B = torch::zeros_like(B);
+    for (int64_t k = 0; k < A_rows; k++) {
+        for (int64_t i_i = A_indptr[k].item<int64_t>(); i_i < A_indptr[k + 1].item<int64_t>(); i_i++) {
+            int64_t i = A_indices[i_i].item<int64_t>();
+            for (int64_t j = 0; j < grad_C.size(1); j++) {
+                grad_B.index_put_({i, j}, grad_B.index({i, j}) + (A_data[i_i] * grad_C.index({k, j})));
+            }
+        }
+    }
+
+    return {grad_A, grad_B};
+}

@@ -76,4 +76,18 @@ FUNC_DEF(std::vector<torch::Tensor>,
          torch::Tensor alpha, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
          torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr,
          torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr);
+
+/* Sparse times dense */
+FUNC_DEF(torch::Tensor,
+         spdmm_forward,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         torch::Tensor B);
+
+FUNC_DEF(std::vector<torch::Tensor>,
+         spdmm_backward,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         torch::Tensor B, torch::Tensor grad_C);
+
 #endif

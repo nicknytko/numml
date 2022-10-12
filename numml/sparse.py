@@ -25,6 +25,7 @@ def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
 
     return values.float(), col_ind, cumsum
 
+
 class spgemv(torch.autograd.Function):
     '''
     Sparse general matrix times vector product
@@ -572,6 +573,7 @@ def splu_solve(LU, b):
     y = LU.solve_triangular(upper=False, unit=True, b=b)
     return LU.solve_triangular(upper=True, unit=False, b=y)
 
+
 def spsolve(A, b):
     '''
     Solves a sparse system of linear equations for a vector right-hand-side.
@@ -592,6 +594,7 @@ def spsolve(A, b):
     LU = splu(A)
     return splu_solve(LU, b)
 
+
 class sptranspose(torch.autograd.Function):
     @staticmethod
     def forward(ctx, A_shape, A_data, A_indices, A_indptr):
@@ -610,6 +613,33 @@ class sptranspose(torch.autograd.Function):
                 grad_A, # A_data
                 None, # A_indices
                 None) # A_indptr
+
+
+class spdmm(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr, B):
+        ctx.save_for_backward(A_data, A_indices, A_indptr, B)
+        ctx.A_shape = A_shape
+
+        C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
+                                          A_data, A_indices, A_indptr, B)
+
+        return C
+
+    @staticmethod
+    def backward(ctx, grad_C):
+        A_data, A_indices, A_indptr, B = ctx.saved_tensors
+        A_shape = ctx.A_shape
+
+        grad_A, grad_B = numml_torch_cpp.spdmm_backward(A_shape[0], A_shape[1],
+                                                        A_data, A_indices, A_indptr,
+                                                        B, grad_C)
+
+        return (None, # A_shape
+                grad_A, # A_data
+                None, # A_indices
+                None, # A_indptr
+                grad_B) # B
 
 
 class SparseCSRTensor(object):
@@ -717,10 +747,16 @@ class SparseCSRTensor(object):
 
         return sstrsv(upper, unit, self.shape, self.data, self.indices, self.indptr, b)
 
-    def spgemm(self, othr):
+    def spspmm(self, othr):
+        assert(self.shape[1] == othr.shape[0])
+
         C_shape, C_data, C_indices, C_indptr = spgemm.apply(self.shape, self.data, self.indices, self.indptr,
                                                             othr.shape, othr.data, othr.indices, othr.indptr)
         return SparseCSRTensor((C_data, C_indices, C_indptr), C_shape)
+
+    def spdmm(self, othr):
+        assert(self.shape[1] == othr.shape[0])
+        return spdmm.apply(self.shape, self.data, self.indices, self.indptr, othr)
 
     def __matmul__(self, x):
         dims = None
@@ -735,9 +771,9 @@ class SparseCSRTensor(object):
             return self.spmv(x)
         elif dims == 2:
             if isinstance(x, SparseCSRTensor):
-                return self.spgemm(x)
+                return self.spspmm(x)
             elif isinstance(x, torch.Tensor):
-                raise RuntimeError('not implemented: sparse times dense matrix product')
+                return self.spdmm(x)
         else:
             raise RuntimeError(f'invalid tensor found for sparse multiply: mode {dims} tensor found.')
 
@@ -800,6 +836,20 @@ class SparseCSRTensor(object):
         '''
 
         return self.data.sum()
+
+    def row_sum(self):
+        '''
+        Computes the sum of entries per row.
+
+        Returns
+        row_sum : torch.Tensor
+          Tensor such that row_sum[i] is the sum of entries in row i
+        '''
+
+        rs = torch.empty(self.shape[1], dtype=self.A.dtype, device=self.device)
+        for i in range(self.shape[0]):
+            rs[i] = torch.sum(self.indptr[i] : self.indptr[i+1])
+        return rs
 
     def abs(self):
         '''
