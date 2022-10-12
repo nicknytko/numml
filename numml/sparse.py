@@ -837,6 +837,20 @@ class SparseCSRTensor(object):
 
         return self.data.sum()
 
+    def row_sum(self):
+        '''
+        Computes the sum of entries per row.
+
+        Returns
+        row_sum : torch.Tensor
+          Tensor such that row_sum[i] is the sum of entries in row i
+        '''
+
+        rs = torch.empty(self.shape[1], dtype=self.A.dtype, device=self.device)
+        for i in range(self.shape[0]):
+            rs[i] = torch.sum(self.indptr[i] : self.indptr[i+1])
+        return rs
+
     def abs(self):
         '''
         Takes the absolute value of each entry, and returns the output as a new tensor.
