@@ -2,6 +2,7 @@ import torch
 import numml_torch_cpp
 import numpy as np
 import scipy.sparse as scisp
+import numml.utils as utils
 
 
 def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
@@ -722,9 +723,12 @@ class SparseCSRTensor(object):
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
 
     def spmv(self, x):
-        return spgemv.apply(self.shape,
-                            torch.tensor(1.).to(x.device), self.data, self.indices, self.indptr, x,
-                            torch.tensor(0.).to(x.device), torch.zeros(self.shape[0]).to(x.device))
+        y = spgemv.apply(self.shape,
+                          torch.tensor(1.).to(x.device), self.data, self.indices, self.indptr, x.squeeze(),
+                          torch.tensor(0.).to(x.device), torch.zeros(self.shape[0]).to(x.device))
+        y = utils.unsqueeze_like(y, x)
+        return y
+
 
     def solve_triangular(self, upper, unit, b):
         '''
@@ -846,9 +850,9 @@ class SparseCSRTensor(object):
           Tensor such that row_sum[i] is the sum of entries in row i
         '''
 
-        rs = torch.empty(self.shape[1], dtype=self.A.dtype, device=self.device)
+        rs = torch.empty(self.shape[1], dtype=self.data.dtype, device=self.device)
         for i in range(self.shape[0]):
-            rs[i] = torch.sum(self.indptr[i] : self.indptr[i+1])
+            rs[i] = torch.sum(self.data[self.indptr[i] : self.indptr[i+1]])
         return rs
 
     def abs(self):

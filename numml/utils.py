@@ -79,3 +79,20 @@ def sp_grad(f, A):
 
     (grad_A_data,) = torch.autograd.grad(to_scalar(f(A)), A.data)
     return sp.SparseCSRTensor((grad_A_data, A.indices, A.indptr), A.shape)
+
+def unsqueeze_like(x, y):
+    '''
+    Unsqueezes tensor x so that it has the same singleton dimensions as y
+
+    Parameters
+    ----------
+    x : torch.Tensor
+      Tensor to unsqueeze
+    y : torch.Tensor
+      Tensor to copy dimensionality
+    '''
+
+    one_dim = torch.where(torch.tensor(y.size()) == 1)[0]
+    for dim in one_dim:
+        x = torch.unsqueeze(x, dim)
+    return x
