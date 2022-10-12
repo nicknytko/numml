@@ -111,7 +111,7 @@ FUNC_IMPL_DISPATCH(torch::Tensor,
                    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
                    torch::Tensor B) {
 
-    return spmdm_forward_cpu(A_rows, A_cols,
+    return spdmm_forward_cpu(A_rows, A_cols,
                              A_data, A_indices, A_indptr, B);
 }
 
@@ -121,7 +121,7 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
                    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
                    torch::Tensor B, torch::Tensor grad_C) {
 
-    return spmdm_backward_cpu(A_rows, A_cols,
+    return spdmm_backward_cpu(A_rows, A_cols,
                               A_data, A_indices, A_indptr, B, grad_C);
 }
 
@@ -140,5 +140,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("spdmm_forward", &spdmm_forward, "Sparse times dense matrix forward");
     m.def("spdmm_backward", &spdmm_backward, "Sparse times dense matrix backward");
-
 }

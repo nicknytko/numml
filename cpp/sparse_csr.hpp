@@ -79,13 +79,13 @@ FUNC_DEF(std::vector<torch::Tensor>,
 
 /* Sparse times dense */
 FUNC_DEF(torch::Tensor,
-         spmdm_forward,
+         spdmm_forward,
          int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
          torch::Tensor B);
 
 FUNC_DEF(std::vector<torch::Tensor>,
-         spmdm_backward,
+         spdmm_backward,
          int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
          torch::Tensor B, torch::Tensor grad_C);
