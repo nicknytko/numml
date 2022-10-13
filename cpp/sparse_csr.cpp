@@ -87,9 +87,15 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
                    torch::Tensor alpha, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
                    torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
 
-    return splincomb_forward_cpu(rows, cols,
-                                 alpha, A_data, A_indices, A_indptr,
-                                 beta, B_data, B_indices, B_indptr);
+    if (is_cuda(A_data)) {
+        return splincomb_forward_cuda(rows, cols,
+                                      alpha, A_data, A_indices, A_indptr,
+                                      beta, B_data, B_indices, B_indptr);
+    } else {
+        return splincomb_forward_cpu(rows, cols,
+                                     alpha, A_data, A_indices, A_indptr,
+                                     beta, B_data, B_indices, B_indptr);
+    }
 }
 
 FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,

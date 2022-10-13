@@ -979,3 +979,188 @@ FUNC_IMPL_CUDA(torch::Tensor,
 
     return grad_A;
 }
+
+/**
+ * Computes number of nonzeros per row when performing a linear combination
+ * of two sparse matrices.
+ *
+ * Indexed on rows of the output.
+ */
+__global__ void cuda_kernel_splincomb_nnz_per_row(int rows, int cols,
+                                                  const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+                                                  const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+                                                  const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
+                                                  const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
+                                                  torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> nnz_per_row) {
+
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+
+    int64_t nnz = 0;
+
+    int64_t i_A = A_indptr[row];
+    int64_t i_B = B_indptr[row];
+
+    int64_t end_A = A_indptr[row + 1];
+    int64_t end_B = B_indptr[row + 1];
+
+    /* Merge the row of A and B */
+    while (i_A < end_A && i_B < end_B) {
+        int64_t col_A = A_indices[i_A];
+        int64_t col_B = B_indices[i_B];
+
+        if (col_A < col_B) {
+            nnz++;
+            i_A++;
+        } else if (col_A > col_B) {
+            nnz++;
+            i_B++;
+        } else { /* we hit the same row-column pair in both matrices */
+            nnz++;
+            i_A++;
+            i_B++;
+        }
+    }
+
+    /* Exhausted shared indices, now we add the rest of the row of A or B */
+    while (i_A < end_A) {
+        nnz++;
+        i_A++;
+    }
+    while (i_B < end_B) {
+        nnz++;
+        i_B++;
+    }
+
+    nnz_per_row[row] = nnz;
+}
+
+/**
+ * Computes the sparse linear combination of two matrices.
+ *
+ * Indexed on rows of the output.
+ */
+template <typename scalar_t>
+__global__ void cuda_kernel_splincomb(int rows, int cols,
+                                      scalar_t alpha, scalar_t beta,
+                                      torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+                                      torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> B_data,
+                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
+                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
+                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> cum_nnz_per_row,
+                                      torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> C_data,
+                                      torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indices,
+                                      torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr) {
+
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+
+    /* Set C_indptr */
+    int64_t C_ptr = (row > 0 ? cum_nnz_per_row[row-1] : 0);
+    C_indptr[row] = C_ptr;
+    if (row == rows-1) {
+        C_indptr[rows] = cum_nnz_per_row[rows - 1];
+    }
+
+    int64_t i_A = A_indptr[row];
+    int64_t i_B = B_indptr[row];
+
+    int64_t end_A = A_indptr[row + 1];
+    int64_t end_B = B_indptr[row + 1];
+
+    /* Merge the row of A and B */
+    while (i_A < end_A && i_B < end_B) {
+        int64_t col_A = A_indices[i_A];
+        int64_t col_B = B_indices[i_B];
+
+        if (col_A < col_B) {
+            C_data[C_ptr] = alpha * A_data[i_A];
+            C_indices[C_ptr] = col_A;
+            C_ptr++;
+            i_A++;
+        } else if (col_A > col_B) {
+            C_data[C_ptr] = beta * B_data[i_B];
+            C_indices[C_ptr] = col_B;
+            C_ptr++;
+            i_B++;
+        } else { /* we hit the same row-column pair in both matrices */
+            C_data[C_ptr] = alpha * A_data[i_A] + beta * B_data[i_B];
+            C_indices[C_ptr] = col_A;
+            C_ptr++;
+            i_A++;
+            i_B++;
+        }
+    }
+
+    /* Exhausted shared indices, now we add the rest of the row of A or B */
+    while (i_A < end_A) {
+        C_data[C_ptr] = alpha * A_data[i_A];
+        C_indices[C_ptr] = A_indices[i_A];
+        C_ptr++;
+        i_A++;
+    }
+    while (i_B < end_B) {
+        C_data[C_ptr] = beta * B_data[i_B];
+        C_indices[C_ptr] = B_indices[i_B];
+        C_ptr++;
+        i_B++;
+    }
+}
+
+FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
+               splincomb_forward,
+               int rows, int cols,
+               torch::Tensor alpha, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+               torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
+
+    auto int_tens_opts = torch::TensorOptions()
+        .dtype(torch::kInt64)
+        .device(A_data.device().type(), A_data.device().index());
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+
+    /* Start by computing the number of elements per row. */
+    torch::Tensor nnz_per_row = torch::empty({rows}, int_tens_opts);
+    cuda_kernel_splincomb_nnz_per_row<<<(rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+        rows, cols,
+        tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
+        tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t),
+        tensor_acc(nnz_per_row, int64_t));
+    torch::Tensor cum_nnz_per_row = nnz_per_row.cumsum(0);
+    const int64_t total_nnz = cum_nnz_per_row[rows - 1].item<int64_t>();
+
+    /* Now combine both matrices */
+    torch::Tensor C_data = torch::empty({total_nnz}, scalar_tens_opts);
+    torch::Tensor C_indices = torch::empty({total_nnz}, int_tens_opts);
+    torch::Tensor C_indptr = torch::empty({rows + 1}, int_tens_opts);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splincomb_forward_cuda", ([&] {
+        cuda_kernel_splincomb<<<(rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+            rows, cols, alpha.item<scalar_t>(), beta.item<scalar_t>(),
+            tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
+            tensor_acc(B_data, scalar_t), tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t),
+            tensor_acc(cum_nnz_per_row, int64_t), tensor_acc(C_data, scalar_t), tensor_acc(C_indices, int64_t), tensor_acc(C_indptr, int64_t));
+    }));
+
+    return {C_data, C_indices, C_indptr};
+}
+
+FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
+               splincomb_backward,
+               int rows, int cols,
+               torch::Tensor alpha, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+               torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr,
+               torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr) {
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    return {};
+}
