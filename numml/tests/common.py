@@ -1,6 +1,13 @@
 import torch
+import torch.linalg as tla
 import numml.sparse as sp
 import numpy as np
+
+
+def relerr(A, Ahat):
+    A_fl = A.to_dense().flatten()
+    Ahat_fl = Ahat.to_dense().flatten()
+    return tla.norm(A_fl - Ahat_fl) / tla.norm(A_fl)
 
 
 def random_sparse(rows, cols, sparsity):

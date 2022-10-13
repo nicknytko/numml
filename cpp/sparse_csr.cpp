@@ -105,10 +105,17 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
                    torch::Tensor beta, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr,
                    torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr) {
 
-    return splincomb_backward_cpu(rows, cols,
-                                  alpha, A_data, A_indices, A_indptr,
-                                  beta, B_data, B_indices, B_indptr,
-                                  grad_C_data, C_indices, C_indptr);
+    if (is_cuda(A_data)) {
+        return splincomb_backward_cuda(rows, cols,
+                                       alpha, A_data, A_indices, A_indptr,
+                                       beta, B_data, B_indices, B_indptr,
+                                       grad_C_data, C_indices, C_indptr);
+    } else {
+        return splincomb_backward_cpu(rows, cols,
+                                      alpha, A_data, A_indices, A_indptr,
+                                      beta, B_data, B_indices, B_indptr,
+                                      grad_C_data, C_indices, C_indptr);
+    }
 }
 
 FUNC_IMPL_DISPATCH(torch::Tensor,

@@ -1154,6 +1154,43 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     return {C_data, C_indices, C_indptr};
 }
 
+template <typename scalar_t>
+__global__ void cuda_kernel_splincomb_backward(int rows, int cols,
+                                               scalar_t scalar,
+                                               const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> gC_data,
+                                               const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indices,
+                                               const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr,
+                                               torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> gA_data,
+                                               const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+                                               const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
+
+    int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+
+    int64_t A_i = A_indptr[row];
+    int64_t C_i = C_indptr[row];
+
+    int64_t A_end = A_indptr[row + 1];
+    int64_t C_end = C_indptr[row + 1];
+
+    while (A_i < A_end && C_i < C_end) {
+        int64_t A_col = A_indices[A_i];
+        int64_t C_col = C_indices[C_i];
+
+        if (A_col < C_col) {
+            A_i++;
+        } else if (A_col > C_col) {
+            C_i++;
+        } else {
+            gA_data[A_i] = gC_data[C_i] * scalar;
+            A_i++;
+            C_i++;
+        }
+    }
+}
+
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                splincomb_backward,
                int rows, int cols,
@@ -1162,5 +1199,24 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr) {
 
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
-    return {};
+
+    /* grad_A = (alpha * grad_c) (*) mask(A) */
+    torch::Tensor grad_A = torch::empty_like(A_data);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splincomb_backward_cuda", ([&] {
+        cuda_kernel_splincomb_backward<<<(rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+            rows, cols, alpha.item<scalar_t>(),
+            tensor_acc(grad_C_data, scalar_t), tensor_acc(C_indices, int64_t), tensor_acc(C_indptr, int64_t),
+            tensor_acc(grad_A, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
+    }));
+
+    /* grad_B = (beta * grad_c) (*) mask(A) */
+    torch::Tensor grad_B = torch::empty_like(B_data);
+    AT_DISPATCH_FLOATING_TYPES(B_data.type(), "splincomb_backward_cuda", ([&] {
+        cuda_kernel_splincomb_backward<<<(rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+            rows, cols, beta.item<scalar_t>(),
+            tensor_acc(grad_C_data, scalar_t), tensor_acc(C_indices, int64_t), tensor_acc(C_indptr, int64_t),
+            tensor_acc(grad_B, scalar_t), tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t));
+    }));
+
+    return {grad_A, grad_B};
 }

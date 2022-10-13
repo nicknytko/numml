@@ -3,6 +3,8 @@ import torch.linalg as tla
 import numml.sparse as sp
 import numml.utils as utils
 import pytest
+import common
+
 
 gpu = torch.device('cuda:0')
 
@@ -17,6 +19,7 @@ B_d = B.to_dense(); BL_d = BL.to_dense()
 A_c = A.to(gpu); AL_c = AL.to(gpu)
 B_c = B.to(gpu); BL_c = BL.to(gpu)
 
+
 def test_matmat():
     C = A@B
     C_c = A_c@B_c
@@ -24,12 +27,14 @@ def test_matmat():
     assert(torch.allclose(C.data, C_c.data.cpu()))
     assert(torch.allclose(A_d@B_d, C.to_dense()))
 
+
 def test_matmat_large():
     C = AL@BL
     C_c = AL_c@BL_c
 
     assert(torch.allclose(C.data, C_c.data.cpu()))
     assert(torch.allclose(AL_d@BL_d, C.to_dense()))
+
 
 def test_skinny():
     # Create a tall, skinny interpolation matrix P
@@ -46,9 +51,11 @@ def test_skinny():
     assert(torch.allclose(AH.data, AH_c.data.cpu()))
     assert(torch.allclose(AH.to_dense(), P_d.T@A_d@P_d))
 
+
 def grad_C_helper(C):
     grad_C = sp.SparseCSRTensor((torch.ones_like(C.data), C.indices, C.indptr), C.shape)
     return grad_C.to_dense()
+
 
 def dense_mask(A):
     mask = torch.zeros(A.shape, dtype=torch.bool)
@@ -58,10 +65,6 @@ def dense_mask(A):
             mask[row, col] = True
     return mask
 
-def relerr(A, Ahat):
-    A_fl = A.to_dense().flatten()
-    Ahat_fl = Ahat.to_dense().flatten()
-    return tla.norm(A_fl - Ahat_fl) / tla.norm(A_fl)
 
 def test_grad_A():
     Ag = AL.copy()
@@ -83,6 +86,7 @@ def test_grad_A():
     # Analytic gradient is (grad C * B^T) (*) mask(A)
     grad = (grad_C_helper(C) @ BL.to_dense().T) * dense_mask(AL)
     assert(torch.allclose(grad, Ag.grad.to_dense()))
+
 
 def test_grad_B():
     Ag = AL.copy()
@@ -128,7 +132,8 @@ def test_skinny_grad_A():
            return (P.T @ A @ P).sum()
 
     assert(torch.allclose(Ag.grad.data, Ag_c.grad.data.cpu()))
-    assert(relerr(utils.sp_fd(grad_A_fd_helper, A), Ag.grad) < 1e-3)
+    assert(common.relerr(utils.sp_fd(grad_A_fd_helper, A), Ag.grad) < 1e-3)
+
 
 def test_skinny_grad_P():
     P_d = torch.zeros((A_N, 4))
@@ -149,4 +154,4 @@ def test_skinny_grad_P():
            return (P.T @ A @ P).sum()
 
     assert(torch.allclose(P.grad.data, P_c.grad.data.cpu()))
-    assert(relerr(utils.sp_fd(grad_A_fd_helper, P.detach()), P.grad) < 1e-3)
+    assert(common.relerr(utils.sp_fd(grad_A_fd_helper, P.detach()), P.grad) < 1e-3)
