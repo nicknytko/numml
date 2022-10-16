@@ -4,6 +4,7 @@ import numml.sparse as sp
 import numml.utils as utils
 import pytest
 import random
+import common
 
 gpu = torch.device('cuda:0')
 
@@ -26,7 +27,7 @@ def test_identity():
         I_c = I.to(gpu)
 
         assert(torch.allclose(X, I @ X))
-        assert(torch.allclose(X_c, I_c @ X))
+        assert(torch.allclose(X_c, I_c @ X_c))
 
 def test_random_small():
     it = 10
@@ -34,6 +35,8 @@ def test_random_small():
         Nc = random.randint(3, 10)
         X = torch.randn(A_N, Nc)
         X_c = X.to(gpu)
+        print('X_c shape', X_c.shape)
+        print(X_c)
 
         AX_d = A_d @ X
 
@@ -74,7 +77,10 @@ def test_backward_grad_A():
         ((Ag@X) * grad_C).sum().backward()
         ((Ag_c@X_c) * grad_C_c).sum().backward()
 
-        assert(torch.allclose(Ag.data.grad, Ag_c.data.grad.cpu()))
+        print(Ag.data.grad.to_dense())
+        print(Ag_c.data.grad.to_dense())
+        print('abserr', tla.norm(Ag.data.grad.to(gpu) - Ag_c.data.grad))
+        assert(common.relerr(Ag.data.grad, Ag_c.data.grad.cpu()) < 1e-6)
 
         # make sure gradient entries are what we expect
         for i in range(AL_N):

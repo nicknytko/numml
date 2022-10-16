@@ -124,8 +124,16 @@ FUNC_IMPL_DISPATCH(torch::Tensor,
                    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
                    torch::Tensor B) {
 
-    return spdmm_forward_cpu(A_rows, A_cols,
-                             A_data, A_indices, A_indptr, B);
+    TORCH_CHECK((A_data.device() == A_indices.device() &&
+                 A_indices.device() == A_indptr.device() &&
+                 A_indptr.device() == B.device()), "expected A and B to be on same device, but got A on (",
+                A_data.device(), ", ", A_indices.device(), ", ", A_indptr.device(), ") and B on ", B.device());
+
+    if (is_cuda(A_data)) {
+        return spdmm_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr, B);
+    } else {
+        return spdmm_forward_cpu(A_rows, A_cols, A_data, A_indices, A_indptr, B);
+    }
 }
 
 FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
@@ -134,8 +142,20 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
                    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
                    torch::Tensor B, torch::Tensor grad_C) {
 
-    return spdmm_backward_cpu(A_rows, A_cols,
-                              A_data, A_indices, A_indptr, B, grad_C);
+    TORCH_CHECK((A_data.device() == A_indices.device() &&
+                 A_indices.device() == A_indptr.device() &&
+                 A_indptr.device() == B.device()), "expected A and B to be on same device, but got A on (",
+                A_data.device(), ", ", A_indices.device(), ", ", A_indptr.device(), ") and B on ", B.device());
+    TORCH_CHECK(B.device() == grad_C.device(), "expected B and grad_C to be on same device, but got B on ",
+                B.device(), " and grad_CC on ", grad_C.device());
+
+    if (is_cuda(A_data)) {
+        return spdmm_backward_cuda(A_rows, A_cols,
+                                   A_data, A_indices, A_indptr, B, grad_C);
+    } else {
+        return spdmm_backward_cpu(A_rows, A_cols,
+                                  A_data, A_indices, A_indptr, B, grad_C);
+    }
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

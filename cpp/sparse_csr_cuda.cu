@@ -18,7 +18,9 @@
 #include "sparse_csr.hpp"
 
 #define tensor_acc(T, type) (T).packed_accessor64<type, 1, torch::RestrictPtrTraits>()
+#define tensor_acc_3(T, N, type) (T).packed_accessor64<type, N, torch::RestrictPtrTraits>()
 
+const int threads_per_block_2d = 32;
 const int threads_per_block = 512;
 
 /* Sparse GEMV */
@@ -1219,4 +1221,123 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     }));
 
     return {grad_A, grad_B};
+}
+
+/**
+ * Compute the inner product between a sparse CSR matrix and dense matrix.
+ * Indexed on blocks of the output.
+ */
+template <typename scalar_t>
+__global__ void cuda_kernel_spdmm_forward(int A_rows, int A_cols, int B_rows, int B_cols,
+                                          const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+                                          const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+                                          const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+                                          const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> B,
+                                          torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> C) {
+
+    const int64_t c_i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t c_j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    const int64_t C_rows = A_rows;
+    const int64_t C_cols = B_cols;
+
+    if (c_i >= C_rows || c_j >= C_cols) {
+        return;
+    }
+
+    scalar_t cij = 0.;
+    for (int64_t i_i = A_indptr[c_i]; i_i < A_indptr[c_i + 1]; i_i++) {
+        const int64_t k = A_indices[i_i];
+        cij += A_data[i_i] * B[k][c_j];
+    }
+    C[c_i][c_j] = cij;
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+               spdmm_forward,
+               int A_rows, int A_cols,
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+               torch::Tensor B) {
+
+    const int64_t B_rows = B.size(0);
+    const int64_t B_cols = B.size(1);
+    const int64_t C_rows = A_rows;
+    const int64_t C_cols = B_cols;
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    torch::Tensor C = torch::empty({C_rows, C_cols}, scalar_tens_opts);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_forward_cuda", ([&] {
+        const dim3 blocks((C_rows + threads_per_block_2d - 1) / threads_per_block_2d,
+                          (C_cols + threads_per_block_2d - 1) / threads_per_block_2d,
+                          1);
+        const dim3 threads(threads_per_block_2d, threads_per_block_2d, 1);
+        cuda_kernel_spdmm_forward<scalar_t><<<blocks, threads, 0, main_stream>>>(
+            A_rows, A_cols, B_rows, B_cols,
+            tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
+            tensor_acc_3(B, 2, scalar_t), tensor_acc_3(C, 2, scalar_t));
+    }));
+
+    return C;
+}
+
+/**
+ * Computes grad_A = (grad_C * B^T) (*) mask(A)
+ *
+ * Indexed on rows of A.
+ */
+template <typename scalar_t>
+__global__ void cuda_kernel_spdmm_backward_masked_A(const int64_t A_rows, const int64_t A_cols,
+                                                    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_A_data,
+                                                    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+                                                    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+                                                    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> B,
+                                                    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> grad_C) {
+
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= A_rows) {
+        return;
+    }
+
+    for (int64_t i_i = A_indptr[i]; i_i < A_indptr[i + 1]; i_i++) {
+        const int64_t j = A_indices[i_i];
+        scalar_t a_ij = 0.;
+
+        for (int64_t k = 0; k < B.size(1); k++) {
+            a_ij += grad_C[i][k] * B[j][k];
+        }
+
+        grad_A_data[i_i] = a_ij;
+    }
+}
+
+FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
+               spdmm_backward,
+               int A_rows, int A_cols,
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+               torch::Tensor B, torch::Tensor grad_C) {
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+
+    /* grad_A = (grad_C * B^T) (*) mask(A) */
+    torch::Tensor grad_A = torch::empty_like(A_data);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_backward_cuda", ([&] {
+        cuda_kernel_spdmm_backward_masked_A<scalar_t><<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+            A_rows, A_cols,
+            tensor_acc(grad_A, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
+            tensor_acc_3(B, 2, scalar_t), tensor_acc_3(grad_C, 2, scalar_t));
+    }));
+
+    /* grad_B = (A^T * grad_C) */
+    std::vector<torch::Tensor> At = csr_transpose_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
+    grad_C = spdmm_forward_cuda(A_cols, A_rows, At[0], At[1], At[2], grad_C);
+
+    return {grad_A, grad_C};
 }

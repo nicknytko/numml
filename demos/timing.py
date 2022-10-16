@@ -116,7 +116,7 @@ def test_spdmm():
     A_c = A.to(gpu)
     B_c = B.to(gpu)
 
-    it = 20
+    it = 500
     fwd_cpu_t = time_op(lambda: A@B, it)
     fwd_gpu_t = time_op(lambda: A_c@B_c, it)
     print_results('SPDMM Forward', fwd_cpu_t, fwd_gpu_t, it, N)
@@ -126,7 +126,7 @@ def test_spdmm():
     A_c.requires_grad = True
     B_c.requires_grad = True
 
-    it = 10
+    it = 500
     bwd_cpu_t = time_op(lambda: (A@B).sum().backward(), it)
     bwd_gpu_t = time_op(lambda: (A_c@B_c).sum().backward(), it)
     print_results('SPDMM Backward', bwd_cpu_t, bwd_gpu_t, it, N)
