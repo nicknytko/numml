@@ -3,6 +3,8 @@ import numml.sparse as sp
 import time
 import sys
 
+# Use one thread for CPU core for fair comparison
+torch.set_num_threads(1)
 
 def time_op(f, it):
     t_start = time.time()
@@ -37,7 +39,7 @@ tests = {}
 ### Timing tests
 
 def test_spmv():
-    N = 1024
+    N = 4096
     A = sp.eye(N)*2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
     x = torch.rand(N)
 
@@ -59,6 +61,30 @@ def test_spmv():
     bwd_gpu_t = time_op(lambda: (A_c@x_c).sum().backward(), it)
     print_results('SPMV Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['spmv'] = test_spmv
+
+def test_mv():
+    N = 4096
+    A = (sp.eye(N)*2 - sp.eye(N, k=-1) - sp.eye(N, k=1)).to_dense()
+    x = torch.rand(N)
+
+    A_c = A.to(gpu)
+    x_c = x.to(gpu)
+
+    it = 1000
+    fwd_cpu_t = time_op(lambda: torch.mv(A, x), it)
+    fwd_gpu_t = time_op(lambda: torch.mv(A_c, x_c), it)
+    print_results('DMV Forward', fwd_cpu_t, fwd_gpu_t, it, N)
+
+    A.requires_grad = True
+    x.requires_grad = True
+    A_c.requires_grad = True
+    x_c.requires_grad = True
+
+    it = 1000
+    bwd_cpu_t = time_op(lambda: torch.mv(A, x).sum().backward(), it)
+    bwd_gpu_t = time_op(lambda: torch.mv(A_c, x_c).sum().backward(), it)
+    print_results('DMV Backward', bwd_cpu_t, bwd_gpu_t, it, N)
+tests['dmv'] = test_mv
 
 def test_spspmm():
     N = 1024
@@ -84,6 +110,30 @@ def test_spspmm():
     print_results('SPSPMM Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['spspmm'] = test_spspmm
 
+def test_ddmm():
+    N = 1024
+    A = (sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)).to_dense()
+    B = (-A).clone()
+
+    A_c = A.to(gpu)
+    B_c = B.to(gpu)
+
+    it = 500
+    fwd_cpu_t = time_op(lambda: A@B, it)
+    fwd_gpu_t = time_op(lambda: A_c@B_c, it)
+    print_results('DDMM Forward', fwd_cpu_t, fwd_gpu_t, it, N)
+
+    A.requires_grad = True
+    B.requires_grad = True
+    A_c.requires_grad = True
+    B_c.requires_grad = True
+
+    it = 500
+    bwd_cpu_t = time_op(lambda: (A@B).sum().backward(), it)
+    bwd_gpu_t = time_op(lambda: (A_c@B_c).sum().backward(), it)
+    print_results('DDMM Backward', bwd_cpu_t, bwd_gpu_t, it, N)
+tests['ddmm'] = test_ddmm
+
 def test_spadd():
     N = 1024
     A = sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
@@ -107,6 +157,30 @@ def test_spadd():
     bwd_gpu_t = time_op(lambda: (A_c+B_c).sum().backward(), it)
     print_results('SP + SP Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['spadd'] = test_spadd
+
+def test_dadd():
+    N = 1024
+    A = (sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)).to_dense()
+    B = (-A).clone()
+
+    A_c = A.to(gpu)
+    B_c = B.to(gpu)
+
+    it = 500
+    fwd_cpu_t = time_op(lambda: A+B, it)
+    fwd_gpu_t = time_op(lambda: A_c+B_c, it)
+    print_results('D + D Forward', fwd_cpu_t, fwd_gpu_t, it, N)
+
+    A.requires_grad = True
+    B.requires_grad = True
+    A_c.requires_grad = True
+    B_c.requires_grad = True
+
+    it = 500
+    bwd_cpu_t = time_op(lambda: (A+B).sum().backward(), it)
+    bwd_gpu_t = time_op(lambda: (A_c+B_c).sum().backward(), it)
+    print_results('D + D Backward', bwd_cpu_t, bwd_gpu_t, it, N)
+tests['dadd'] = test_dadd
 
 def test_spdmm():
     N = 128
@@ -151,7 +225,26 @@ def test_splu():
     print_results('SPLU Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['splu'] = test_splu
 
-def test_trisolve():
+def test_dlu():
+    N = 128
+    A = (sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)).to_dense()
+    A_c = A.to(gpu)
+
+    it = 20
+    fwd_cpu_t = time_op(lambda: sp.splu(A), it)
+    fwd_gpu_t = time_op(lambda: sp.splu(A_c), it)
+    print_results('DLU Forward', fwd_cpu_t, fwd_gpu_t, it, N)
+
+    A.requires_grad = True
+    A_c.requires_grad = True
+
+    it = 10
+    bwd_cpu_t = time_op(lambda: sp.splu(A).sum().backward(), it)
+    bwd_gpu_t = time_op(lambda: sp.splu(A_c).sum().backward(), it)
+    print_results('DLU Backward', bwd_cpu_t, bwd_gpu_t, it, N)
+tests['dlu'] = test_dlu
+
+def test_sptrisolve():
     N = 512
     A = sp.eye(N) * 2 - sp.eye(N, k=-1)
     A_c = A.to(gpu)
@@ -170,7 +263,28 @@ def test_trisolve():
     bwd_cpu_t = time_op(lambda: A.solve_triangular(upper=False, unit=False, b=x).sum().backward(), it)
     bwd_gpu_t = time_op(lambda: A_c.solve_triangular(upper=False, unit=False, b=x_c).sum().backward(), it)
     print_results('SP Tri-Solve Backward', bwd_cpu_t, bwd_gpu_t, it, N)
-tests['trisolve'] = test_trisolve
+tests['sptrisolve'] = test_sptrisolve
+
+def test_dtrisolve():
+    N = 512
+    A = (sp.eye(N) * 2 - sp.eye(N, k=-1)).to_dense()
+    A_c = A.to(gpu)
+    x = torch.ones(N)
+    x_c = x.to(gpu)
+
+    it = 20
+    fwd_cpu_t = time_op(lambda: torch.solve_triangular(x, A, upper=False, unitriangular=False), it)
+    fwd_gpu_t = time_op(lambda: torch.solve_triangular(x_c, A_c, upper=False, unitriangular=False), it)
+    print_results('D Tri-Solve Forward', fwd_cpu_t, fwd_gpu_t, it, N)
+
+    A.requires_grad = True
+    A_c.requires_grad = True
+
+    it = 10
+    bwd_cpu_t = time_op(lambda: torch.solve_triangular(x, A, upper=False, unitriangular=False).sum().backward(), it)
+    bwd_gpu_t = time_op(lambda: torch.solve_triangular(x_c, A_c, upper=False, unitriangular=False).sum().backward(), it)
+    print_results('D Tri-Solve Backward', bwd_cpu_t, bwd_gpu_t, it, N)
+tests['dtrisolve'] = test_dtrisolve
 
 ### Arg checks
 
