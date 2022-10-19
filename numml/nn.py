@@ -153,3 +153,49 @@ class Sequential(torch.nn.Module):
         for layer in self.modlist:
             X = layer(A, X)
         return torch.squeeze(X)
+
+    import numpy as np
+
+
+def model_to_vector(model):
+    vec_size = 0
+    state_dict = model.state_dict()
+
+    # Scan state dictionary to determine output vector length
+    for weight in model.state_dict().values():
+        vec_size += torch.prod(torch.tensor(weight.detach().shape))
+    weights_vector = torch.zeros(vec_size)
+
+    # Finally, populate vector
+    cur_spot = 0
+    for name, weights in state_dict.items():
+        vector = weights.detach().flatten()
+        n = len(vector)
+
+        weights_vector[cur_spot:cur_spot+n] = vector
+        cur_spot += n
+
+    return weights_vector
+
+# https://discuss.pytorch.org/t/combining-two-models/77716/6
+def get_last_module(model, indices):
+    mod = model
+    for idx in indices:
+        mod = getattr(mod, idx)
+    return mod
+
+
+def vector_to_model(model, weights_vector):
+    pointer = 0
+    model_params = list(model.named_parameters())
+
+    for name, p in model_params:
+        indices = name.split(".")
+        mod = get_last_module(model, indices[:-1])
+        p_name = indices[-1]
+        if isinstance(p, torch.nn.Parameter):
+            delattr(mod, p_name)
+
+        num_param = p.numel()
+        setattr(mod, p_name, weights_vector[pointer:(pointer + num_param)].view_as(p))
+        pointer += num_param

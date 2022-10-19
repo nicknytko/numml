@@ -100,14 +100,13 @@ class FixedPointIteration(torch.autograd.Function):
             w_n = grad_x_star + wTdfdx
             diff_w = tla.norm(w_n-w)
             w = w_n
-            if diff_w < 1e-6:
+            if diff_w < 1e-4:
                 break
 
             it += 1
             if it > 300:
-                # fp did not converge, if we're blowing up return 0 grad
-                if diff_w > 1:
-                    w_n = torch.zeros_like(grad_x_star)
+                # no convergence, return zero grad
+                w = torch.zeros_like(grad_x_star)
                 break
 
         # Now, return w^T df/dtheta = z(I - df/dx)^{-1} df/dtheta
