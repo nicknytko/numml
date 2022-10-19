@@ -643,8 +643,16 @@ class spdmm(torch.autograd.Function):
                 grad_B) # B
 
 
+def unpack_csr(A):
+    return A.data, A.indices, A.indptr, A.shape
+
+
+def repack_csr(A_data, A_indices, A_indptr, A_shape):
+    return SparseCSRTensor((A_data, A_indices, A_indptr), A_shape, clone=False)
+
+
 class SparseCSRTensor(object):
-    def __init__(self, arg1, shape=None):
+    def __init__(self, arg1, shape=None, clone=True):
         '''
         Compressed Sparse Row matrix (tensor) with gradient support on
         nonzero entries.
@@ -699,17 +707,26 @@ class SparseCSRTensor(object):
                 if isinstance(arg1[0], np.ndarray):
                     self.data = torch.Tensor(arg1[0].copy())
                 elif isinstance(arg1[1], torch.Tensor):
-                    self.data = torch.clone(arg1[0])
+                    if clone:
+                        self.data = torch.clone(arg1[0])
+                    else:
+                        self.data = arg1[0]
 
                 if isinstance(arg1[1], np.ndarray):
                     self.indices = torch.Tensor(arg1[1].copy()).long()
                 elif isinstance(arg1[1], torch.Tensor):
-                    self.indices = torch.clone(arg1[1]).long()
+                    if clone:
+                        self.indices = torch.clone(arg1[1]).long()
+                    else:
+                        self.indices = arg1[1]
 
                 if isinstance(arg1[2], np.ndarray):
                     self.indptr = torch.Tensor(arg1[2].copy()).long()
                 elif isinstance(arg1[2], torch.Tensor):
-                    self.indptr = torch.clone(arg1[2]).long()
+                    if clone:
+                        self.indptr = torch.clone(arg1[2]).long()
+                    else:
+                        self.indptr = arg1[2]
 
                 self.shape = shape
             elif len(arg1) == 2:
