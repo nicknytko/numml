@@ -56,7 +56,8 @@ class GCNConv(torch.nn.Module):
         if self.normalize:
             D = (A.row_sum() + 1.) ** -0.5
             XTheta = X @ self.weights
-            Xprime = D[:, None] * (A @ (D[:, None] * XTheta))
+            XDTheta = (D[:, None] * XTheta)
+            Xprime = D[:, None] * (A @ XDTheta + XDTheta)
         else:
             Xprime = A @ (X @ self.weights)
 
@@ -125,7 +126,7 @@ class TAGConv(torch.nn.Module):
         for k in range(self.k):
             # perform A @ X
             if self.normalize:
-                Xc = D[:, None] * (A @ (D[:, None] * Xc))
+                Xc = D[:, None] * (A @ (D[:, None] * Xc + Xc))
             else:
                 Xc = A @ Xc
 
