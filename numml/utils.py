@@ -4,7 +4,7 @@ import numml_torch_cpp
 import numpy as np
 import numml.sparse as sp
 
-def to_scalar(f):
+def _to_scalar(f):
     '''
     Small helper for the gradient functions below.  If a function gives some
     tensor output instead of a scalar, return the sum of the entries as the gradient
@@ -19,7 +19,13 @@ def to_scalar(f):
     else:
         raise RuntimeError(f'Unknown type for output: {type(f)}')
 
-def sp_fd(f, A, h=1e-3):
+def _f_wargs(f, X, fargs):
+    if fargs is None:
+        return f(X)
+    else:
+        return f(X, *fargs)
+
+def sp_fd(f, A, fargs=None, h=1e-3):
     '''
     Centered sparse finite differences, used to check gradients.
 
@@ -35,7 +41,7 @@ def sp_fd(f, A, h=1e-3):
     Returns
     -------
     grad_A : SparseCSRTensor
-      Approximate gradient of f with respect to A
+      Approximate gradient of f with respect to A evaluated at A
     '''
 
     M = A.copy()
@@ -47,14 +53,63 @@ def sp_fd(f, A, h=1e-3):
         A_data_bwd = torch.clone(A.data)
         A_data_bwd[i] -= h
 
-        f_fwd = to_scalar(f(sp.SparseCSRTensor((A_data_fwd, A.indices, A.indptr), A.shape)))
-        f_bwd = to_scalar(f(sp.SparseCSRTensor((A_data_bwd, A.indices, A.indptr), A.shape)))
+        with torch.no_grad():
+            f_fwd = _to_scalar(_f_wargs(sp.SparseCSRTensor((A_data_fwd, A.indices, A.indptr), A.shape), fargs))
+            f_bwd = _to_scalar(_f_wargs(sp.SparseCSRTensor((A_data_bwd, A.indices, A.indptr), A.shape), fargs))
 
         M.data[i] = (f_fwd - f_bwd) / (2*h)
 
     return M
 
-def sp_grad(f, A):
+def reg_fd(f, x, fargs=None, h=1e-3):
+    '''
+    Centered finite differences on non-sparse inputs, used to check gradients.
+
+    Parameters
+    ----------
+    f : function
+      Function that takes a torch Tensor as its parameter and returns a scalar
+    x : torch.Tensor
+      Tensor that will be permuted to approximate gradient information
+    h : float
+      Perturbation value
+
+    Returns
+    -------
+    grad_x : torch.Tensor
+      Approximate gradient of f with respect to x evaluated at x
+    '''
+
+    dx = torch.empty_like(x).flatten()
+
+    for i in range(len(dx)):
+        x_fwd = x.clone().flatten()
+        x_fwd[i] += h
+        x_fwd = x_fwd.reshape(x.shape)
+
+        x_bwd = x.clone().flatten()
+        x_bwd[i] -= h
+        x_bwd = x_bwd.reshape(x.shape)
+
+        with torch.no_grad():
+            f_fwd = _to_scalar(_f_wargs(f, x_fwd, fargs))
+            f_bwd = _to_scalar(_f_wargs(f, x_bwd, fargs))
+
+        dx[i] = (f_fwd - f_bwd) / (2*h)
+
+    return dx.reshape(x.shape)
+
+
+def fd(f, X, fargs=None, h=1e-3):
+    if isinstance(X, sp.SparseCSRTensor):
+        return sp_fd(f, X, fargs, h)
+    elif isinstance(X, torch.Tensor):
+        return reg_fd(f, X, fargs, h)
+    else:
+        raise RuntimeError(f'Encountered unknown type when trying to take finite difference: {X.type}.')
+
+
+def sp_grad(f, A, fargs=None):
     '''
     Wrapper around torch's autograd function to return gradient
     information for a sparse tensor.
@@ -73,12 +128,26 @@ def sp_grad(f, A):
       Computed using Torch's autogradient module.
     '''
 
-    if not A.requires_grad:
-        A = A.copy()
-        A.requires_grad = True
+    A = A.copy().detach()
+    A.requires_grad = True
 
-    (grad_A_data,) = torch.autograd.grad(to_scalar(f(A)), A.data)
+    (grad_A_data,) = torch.autograd.grad(_to_scalar(_f_wargs(f, A, fargs)), A.data)
     return sp.SparseCSRTensor((grad_A_data, A.indices, A.indptr), A.shape)
+
+def reg_grad(f, X, fargs=None):
+    X = X.clone().detach()
+    X.requires_grad = True
+
+    (grad_X,) = torch.autograd.grad(_to_scalar(_f_wargs(f, X, fargs)), X)
+    return grad_X
+
+def grad(f, X, fargs=None):
+    if isinstance(X, sp.SparseCSRTensor):
+        return sp_grad(f, X, fargs)
+    elif isinstance(X, torch.Tensor):
+        return reg_grad(f, X, fargs)
+    else:
+        raise RuntimeError(f'Encountered unknown type when trying to take gradient: {X.type}.')
 
 def unsqueeze_like(x, y):
     '''

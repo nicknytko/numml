@@ -3,6 +3,7 @@ import torch.autograd
 import torch.autograd.functional
 import torch.linalg as tla
 import numml.sparse as sp
+import numml.utils as utils
 
 
 class FixedPointIteration(torch.autograd.Function):
@@ -38,13 +39,20 @@ class FixedPointIteration(torch.autograd.Function):
         return tuple(map(clean, tup))
 
     @staticmethod
-    def _vjp_single(f, inputs, d_idx, v):
+    def _vjp_single(f, inputs, d_idx, v, cleaned=False):
         grad = None
+        if not cleaned:
+            cleaned_inputs = FixedPointIteration._clean_grads(inputs)
+            cleaned_inputs[d_idx].requires_grad = True
+        else:
+            cleaned_inputs = inputs
+
         with torch.enable_grad():
             try:
-                grad = torch.autograd.grad(f(*inputs), inputs[d_idx], grad_outputs=v)[0]
+                grad = torch.autograd.grad(f(*cleaned_inputs), cleaned_inputs[d_idx], grad_outputs=v)[0]
             except Exception as e:
                 pass # Don't require grad, return None
+
         return grad
 
     @staticmethod
@@ -53,7 +61,7 @@ class FixedPointIteration(torch.autograd.Function):
         cleaned_inputs = FixedPointIteration._clean_grads(inputs)
         for i in range(len(inputs)):
             if isinstance(inputs[i], torch.Tensor):
-                grads[i] = FixedPointIteration._vjp_single(f, cleaned_inputs, i, v)
+                grads[i] = FixedPointIteration._vjp_single(f, cleaned_inputs, i, v, cleaned=True)
         return grads
 
     @staticmethod
@@ -88,26 +96,35 @@ class FixedPointIteration(torch.autograd.Function):
         fargs = ctx.fargs
         f = ctx.f
 
-        # Fixed point iteration to find w^T = z^T + w^T df/dx
-        # => w^T = v^T(I - df/dx)^{-1}
-        # => (I - df/dx)^T w = v
-        w = grad_x_star.detach().clone()
+        # Fixed point iteration to find w^T = grad_x^T + w^T df/dx
+        # => w^T = grad_x^T (I - df/dx)^{-1}
+        # => (I - df/dx)^T w = grad_x
+        w = torch.zeros_like(grad_x_star)
         it = 0
 
         while True:
             wTdfdx = FixedPointIteration._vjp_single(f, (x_star, *fargs), 0, w)
+            diff_w = tla.norm(w - (grad_x_star + wTdfdx))
+
+            if diff_w < 1e-6:
+                break
 
             w_n = grad_x_star + wTdfdx
-            diff_w = tla.norm(w_n-w)
             w = w_n
-            if diff_w < 1e-4:
-                break
 
             it += 1
             if it > 300:
                 # no convergence, return zero grad
+                print('did not converge', diff_w)
                 w = torch.zeros_like(grad_x_star)
                 break
+
+        print('w', w)
+        print('grad_x + w df/dx', grad_x_star + FixedPointIteration._vjp_single(f, (x_star, *fargs), 0, w))
+
+        def fd_wrapper(x_star):
+            return torch.sum(f(x_star, *fargs))
+        print('grad_x + w fd', grad_x_star + utils.fd(fd_wrapper, grad_x_star) * w)
 
         # Now, return w^T df/dtheta = z(I - df/dx)^{-1} df/dtheta
         grads = FixedPointIteration._vjp(f, (x_star, *fargs), w)
