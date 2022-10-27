@@ -183,8 +183,7 @@ def test_dadd():
 tests['dadd'] = test_dadd
 
 def test_spdmm():
-    #N = 16_384
-    N = 512
+    N = 16_384
     A = sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
     B = (-A).copy().to_dense()
 
