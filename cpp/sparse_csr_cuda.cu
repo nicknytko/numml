@@ -17,11 +17,11 @@
 
 #include "sparse_csr.hpp"
 
-#define tensor_acc(T, type) (T).packed_accessor64<type, 1, torch::RestrictPtrTraits>()
-#define tensor_acc_3(T, N, type) (T).packed_accessor64<type, N, torch::RestrictPtrTraits>()
-
 const int threads_per_block_2d = 32;
 const int threads_per_block = 512;
+
+#define tensor_acc(T, type) (T).packed_accessor64<type, 1, torch::RestrictPtrTraits>()
+#define tensor_acc_3(T, N, type) (T).packed_accessor64<type, N, torch::RestrictPtrTraits>()
 
 /* Sparse GEMV */
 
@@ -508,7 +508,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     torch::Tensor Chat_I = torch::empty({Chat_total_nnz}, int_tens_opts);
     torch::Tensor Chat_J = torch::empty({Chat_total_nnz}, int_tens_opts);
     torch::Tensor Chat_V = torch::empty({Chat_total_nnz}, scalar_tens_opts);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_forward_cuda", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_forward_cuda", ([&] {
         cuda_kernel_Chat_expansion<scalar_t><<<(C_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             C_rows,
             tensor_acc(A_data, scalar_t), tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),

@@ -115,16 +115,8 @@ class FixedPointIteration(torch.autograd.Function):
             it += 1
             if it > 300:
                 # no convergence, return zero grad
-                print('did not converge', diff_w)
                 w = torch.zeros_like(grad_x_star)
                 break
-
-        print('w', w)
-        print('grad_x + w df/dx', grad_x_star + FixedPointIteration._vjp_single(f, (x_star, *fargs), 0, w))
-
-        def fd_wrapper(x_star):
-            return torch.sum(f(x_star, *fargs))
-        print('grad_x + w fd', grad_x_star + utils.fd(fd_wrapper, grad_x_star) * w)
 
         # Now, return w^T df/dtheta = z(I - df/dx)^{-1} df/dtheta
         grads = FixedPointIteration._vjp(f, (x_star, *fargs), w)

@@ -54,8 +54,8 @@ def sp_fd(f, A, fargs=None, h=1e-3):
         A_data_bwd[i] -= h
 
         with torch.no_grad():
-            f_fwd = _to_scalar(_f_wargs(sp.SparseCSRTensor((A_data_fwd, A.indices, A.indptr), A.shape), fargs))
-            f_bwd = _to_scalar(_f_wargs(sp.SparseCSRTensor((A_data_bwd, A.indices, A.indptr), A.shape), fargs))
+            f_fwd = _to_scalar(_f_wargs(f, sp.SparseCSRTensor((A_data_fwd, A.indices, A.indptr), A.shape), fargs))
+            f_bwd = _to_scalar(_f_wargs(f, sp.SparseCSRTensor((A_data_bwd, A.indices, A.indptr), A.shape), fargs))
 
         M.data[i] = (f_fwd - f_bwd) / (2*h)
 

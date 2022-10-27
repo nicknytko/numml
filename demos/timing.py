@@ -39,7 +39,7 @@ tests = {}
 ### Timing tests
 
 def test_spmv():
-    N = 4096
+    N = 32_768
     A = sp.eye(N)*2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
     x = torch.rand(N)
 
@@ -63,7 +63,7 @@ def test_spmv():
 tests['spmv'] = test_spmv
 
 def test_mv():
-    N = 4096
+    N = 32_768
     A = (sp.eye(N)*2 - sp.eye(N, k=-1) - sp.eye(N, k=1)).to_dense()
     x = torch.rand(N)
 
@@ -87,14 +87,14 @@ def test_mv():
 tests['dmv'] = test_mv
 
 def test_spspmm():
-    N = 1024
+    N = 16_384
     A = sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
     B = (-A).copy()
 
     A_c = A.to(gpu)
     B_c = B.to(gpu)
 
-    it = 500
+    it = 2
     fwd_cpu_t = time_op(lambda: A@B, it)
     fwd_gpu_t = time_op(lambda: A_c@B_c, it)
     print_results('SPSPMM Forward', fwd_cpu_t, fwd_gpu_t, it, N)
@@ -104,21 +104,21 @@ def test_spspmm():
     A_c.requires_grad = True
     B_c.requires_grad = True
 
-    it = 500
+    it = 2
     bwd_cpu_t = time_op(lambda: (A@B).sum().backward(), it)
     bwd_gpu_t = time_op(lambda: (A_c@B_c).sum().backward(), it)
     print_results('SPSPMM Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['spspmm'] = test_spspmm
 
 def test_ddmm():
-    N = 1024
+    N = 16_384
     A = (sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)).to_dense()
     B = (-A).clone()
 
     A_c = A.to(gpu)
     B_c = B.to(gpu)
 
-    it = 500
+    it = 2
     fwd_cpu_t = time_op(lambda: A@B, it)
     fwd_gpu_t = time_op(lambda: A_c@B_c, it)
     print_results('DDMM Forward', fwd_cpu_t, fwd_gpu_t, it, N)
@@ -128,21 +128,21 @@ def test_ddmm():
     A_c.requires_grad = True
     B_c.requires_grad = True
 
-    it = 500
+    it = 2
     bwd_cpu_t = time_op(lambda: (A@B).sum().backward(), it)
     bwd_gpu_t = time_op(lambda: (A_c@B_c).sum().backward(), it)
     print_results('DDMM Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['ddmm'] = test_ddmm
 
 def test_spadd():
-    N = 1024
+    N = 32_768
     A = sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
     B = (-A).copy()
 
     A_c = A.to(gpu)
     B_c = B.to(gpu)
 
-    it = 500
+    it = 10
     fwd_cpu_t = time_op(lambda: A+B, it)
     fwd_gpu_t = time_op(lambda: A_c+B_c, it)
     print_results('SP + SP Forward', fwd_cpu_t, fwd_gpu_t, it, N)
@@ -152,21 +152,21 @@ def test_spadd():
     A_c.requires_grad = True
     B_c.requires_grad = True
 
-    it = 500
+    it = 10
     bwd_cpu_t = time_op(lambda: (A+B).sum().backward(), it)
     bwd_gpu_t = time_op(lambda: (A_c+B_c).sum().backward(), it)
     print_results('SP + SP Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['spadd'] = test_spadd
 
 def test_dadd():
-    N = 1024
+    N = 32_768
     A = (sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)).to_dense()
     B = (-A).clone()
 
     A_c = A.to(gpu)
     B_c = B.to(gpu)
 
-    it = 500
+    it = 10
     fwd_cpu_t = time_op(lambda: A+B, it)
     fwd_gpu_t = time_op(lambda: A_c+B_c, it)
     print_results('D + D Forward', fwd_cpu_t, fwd_gpu_t, it, N)
@@ -176,21 +176,22 @@ def test_dadd():
     A_c.requires_grad = True
     B_c.requires_grad = True
 
-    it = 500
+    it = 10
     bwd_cpu_t = time_op(lambda: (A+B).sum().backward(), it)
     bwd_gpu_t = time_op(lambda: (A_c+B_c).sum().backward(), it)
     print_results('D + D Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['dadd'] = test_dadd
 
 def test_spdmm():
-    N = 128
+    #N = 16_384
+    N = 512
     A = sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
     B = (-A).copy().to_dense()
 
     A_c = A.to(gpu)
     B_c = B.to(gpu)
 
-    it = 500
+    it = 2
     fwd_cpu_t = time_op(lambda: A@B, it)
     fwd_gpu_t = time_op(lambda: A_c@B_c, it)
     print_results('SPDMM Forward', fwd_cpu_t, fwd_gpu_t, it, N)
@@ -200,7 +201,7 @@ def test_spdmm():
     A_c.requires_grad = True
     B_c.requires_grad = True
 
-    it = 500
+    it = 2
     bwd_cpu_t = time_op(lambda: (A@B).sum().backward(), it)
     bwd_gpu_t = time_op(lambda: (A_c@B_c).sum().backward(), it)
     print_results('SPDMM Backward', bwd_cpu_t, bwd_gpu_t, it, N)
