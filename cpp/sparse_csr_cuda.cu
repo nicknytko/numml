@@ -122,33 +122,32 @@ __device__ int64_t kernel_indices_binsearch(int64_t i_start, int64_t i_end, int6
 
 /**
  * Computes the gradient of Ax wrt x in the spgemv product.
- * Indexed on entries of grad_x.
+ * Indexed on entries of A.
+ *
+ * Based on the implementation in
+ * "Atomic reduction based sparse matrix-transpose vector multiplication on GPUs",
+ * Y. Tao, Y. Deng, S. Mu, ICPADS (2014)
  */
 template <typename scalar_t>
-__global__ void spgemv_backward_cuda_kernel_grad_x(
+__global__ void spgemv_backward_cuda_kernel_grad_x_atomic(
     int A_rows, int A_cols, scalar_t alpha,
     const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_z,
     const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_col_ind,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_rowptr,
-    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_x) {
+    scalar_t* __restrict__ grad_x) {
 
     /* Compute grad_x = alpha * A^T grad_z */
 
-    int64_t x_row = blockIdx.x * blockDim.x + threadIdx.x; /* indexing into the output grad_x */
-    if (x_row >= grad_x.size(0)) {
+    const int64_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= A_rows) {
         return;
     }
 
-    scalar_t xi = 0.;
-
-    for (int64_t row = 0; row < A_rows; row++) {
-        int64_t col_idx = kernel_indices_binsearch(A_rowptr[row], A_rowptr[row + 1], x_row, A_col_ind); /* TODO: optimize this */
-        if (col_idx != -1) {
-            xi += alpha * A_data[col_idx] * grad_z[row];
-        }
+    for (int64_t k_i = A_rowptr[k]; k_i < A_rowptr[k + 1]; k_i++) {
+        const int64_t i = A_col_ind[k_i];
+        atomicAdd(grad_x + i, A_data[k_i] * grad_z[k]);
     }
-    grad_x[x_row] = xi;
 }
 
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
@@ -172,15 +171,26 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     }));
 
     /* Gradient wrt x */
-    torch::Tensor grad_x = torch::empty_like(x);
-    const int grad_x_threads = x.sizes()[0];
-    const dim3 grad_x_blocks((grad_x_threads + threads_per_block - 1) / threads_per_block, 1);
+    torch::Tensor grad_x;
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_backward_cuda", ([&] {
-        spgemv_backward_cuda_kernel_grad_x<scalar_t><<<grad_x_blocks, threads_per_block, 0, main_stream>>>(
+        /* We'll create a temporary array to store outputs to and simplify things */
+        scalar_t* grad_x_ary = nullptr;
+        cudaMalloc(&grad_x_ary, A_cols * sizeof(scalar_t));
+        cudaMemset(grad_x_ary, 0, A_cols * sizeof(scalar_t));
+
+        const int grad_x_threads = A_rows;
+        const dim3 grad_x_blocks((grad_x_threads + threads_per_block - 1) / threads_per_block, 1);
+        spgemv_backward_cuda_kernel_grad_x_atomic<scalar_t><<<grad_x_blocks, threads_per_block, 0, main_stream>>>(
             A_rows, A_cols, alpha.item<scalar_t>(),
             tensor_acc(grad_z, scalar_t),
             tensor_acc(A_data, scalar_t), tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t),
-            tensor_acc(grad_x, scalar_t));
+            grad_x_ary);
+
+        /* Array blob -> torch tensor.  Torch will handle deallocation if we pass it a destructor. */
+        const auto scalar_tens_opts = torch::TensorOptions()
+            .dtype(A_data.dtype())
+            .device(A_data.device().type(), A_data.device().index());
+        grad_x = torch::from_blob(grad_x_ary, { static_cast<int64_t>(A_cols) }, cudaFree, scalar_tens_opts);
     }));
 
     return {grad_A, grad_x};
