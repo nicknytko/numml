@@ -1,0 +1,219 @@
+\documentclass{article}
+
+\usepackage{lipsum}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{graphicx}
+\usepackage{epstopdf}
+\ifpdf%
+\DeclareGraphicsExtensions{.eps,.pdf,.png,.jpg}
+\else
+\DeclareGraphicsExtensions{.eps}
+\fi
+\usepackage{amsopn}
+\DeclareMathOperator{\diag}{diag}
+\usepackage{booktabs}
+\usepackage{bbm}
+\usepackage{bm}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{placeins}
+\usepackage{cleveref}
+\usepackage{listings}
+
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+\newcommand{\normtwo}[1]{\left\lVert#1\right\rVert_2}
+\newcommand{\abs}[1]{\left\lvert#1\right\rvert}
+\newcommand{\mat}[1]{\bm{{#1}}}
+\renewcommand{\vec}[1]{\bm{{#1}}}
+\newcommand{\tensor}[1]{\bm{{\mathcal{#1}}}}
+\newcommand{\lequiv}{\Leftrightarrow}
+\newcommand{\bigO}[1]{\mathcal{O}\!\left(#1\right)}
+\newcommand{\ceil}[1]{\left\lceil #1 \right\rceil}
+\newcommand{\floor}[1]{\left\lfloor #1 \right\rfloor}
+\newcommand{\sfrac}[2]{#1/#2}
+\newcommand{\hquad}{\enskip}
+\newcommand{\expected}[1]{\mathbb{E}\left[#1\right]}
+\newcommand{\mspan}[1]{\text{span}\left( #1 \right)}
+\newcommand{\prob}[1]{P\left(#1\right)}
+\newcommand{\probt}[1]{P\left( \text{#1} \right)}
+\newcommand{\condprob}[2]{P\left(#1 \:|\: #2\right)}
+\newcommand{\condprobt}[2]{P\left(\text{#1} \:|\: \text{#2}\right)}
+\newcommand{\bayes}[2]{\frac{\condprob{#2}{#1}\prob{#1}}{\prob{#2}}}
+\newcommand{\bayesx}[3]{\frac{\condprob{#2}{#1}\prob{#1}}{\condprob{#2}{#1}\prob{#1} + \condprob{#2}{#3}\prob{#3}}}
+\newcommand{\sech}{\text{sech}}
+\newcommand*{\vertbar}{\rule[-1ex]{0.5pt}{2.5ex}}
+\newcommand*{\horzbar}{\rule[.5ex]{2.5ex}{0.5pt}}
+\newcommand{\vect}[2]{\underline{{#1}}_{{#2}}}
+\newcommand{\basisp}[1]{\underline{{p}}_{{#1}}}
+\newcommand{\basisq}[1]{\underline{{q}}_{{#1}}}
+\newcommand{\coeff}[1]{\underline{{a}}_{{#1}}}
+\newcommand{\bestfit}{\underline{\bar{x}}}
+\newcommand{\grad}{\nabla}
+\newcommand{\laplace}{\Delta}
+\newcommand{\setbar}{\:\middle|\:}
+\renewcommand{\div}{\grad \cdot}
+\renewcommand{\Re}{\text{Re}}
+\newcommand{\var}[1]{\texttt{{#1}}}
+\newcommand{\mask}[1]{\text{mask}\left( {#1} \right)}
+\newcommand{\gradfn}[2]{\nabla_{{#1}}\left({#2}\right)} % grad wrt #1 of #2
+\newcommand{\jac}[2]{J_{{#1}}\left({#2}\right)} % jacobian wrt #1 of #2
+\newcommand{\elemwise}[2]{\left[#1\right]_{{#2}}} % elementwise of #1 indexed at #2
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{corollary}{Corollary}[theorem]
+\newtheorem{lemma}[theorem]{Lemma}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[section]
+
+\begin{document}
+\title{Differentiation through iterative solvers}
+\author{Nicolas Nytko}
+\maketitle
+
+\section{Background}
+Consider some function $f : \mathbb{R}^n \times \mathbb{R}^m \to \mathbb{R}^n$ that describes the iterative process
+\begin{equation}
+  \vec{x}^{(k+1)} = f\left(\vec{x}^{(k)}, \vec{\theta}\right),
+\end{equation}
+where $\vec{x}^{(k)}$ is the state at iteration $k$ and $\vec{\theta}$ is some set of parameters used at each step of the iteration that we would like to differentiate this process with respect to.  We will assume that as $k \to \infty$, $\vec{x}^{(k)}$ converges to a \textit{fixed point} such that
+\begin{equation}
+  \vec{x}^{\star} = f\left(\vec{x}^{\star}, \vec{\theta}\right),
+\end{equation}
+at least to within some small numerical tolerance.  There are two ways to look at this problem depending on what information we are trying to obtain:
+\begin{enumerate}
+\item We care about the end result only.  We assume that $f$ is some reasonable method and we converge to $\vec{x}^{\star}$.  Lets call this the \textit{convergent} analysis.
+\item We want to look at intermediate results.  There is no assumption that $f$ actually converges to $\vec{x}^{\star}$ --- we might be optimizing the method itself here.  Lets call this one the \textit{nonconvergent} analysis.
+\end{enumerate}
+
+\section{Convergent Methods}
+We assume that we run the method $f$ for a sufficient number of iterations such that we have a reasonable approximation to $\vec{x}^{\star}$, which we will denote by $\hat{\vec{x}}$.  We therefore have
+\begin{equation}
+  \hat{\vec{x}} = f\left(\hat{\vec{x}}, \vec{\theta}\right) + \vec{\varepsilon}\left(\vec{\theta}\right),
+\end{equation}
+for some (hopefully) small $\vec{\varepsilon}$.  Taking the derivative of both sides with respect to the parameter $\vec{\theta}$, we get
+\begin{align}
+  \frac{\partial \hat{\vec{x}}}{\partial \vec{\theta}}  &= \frac{\partial}{\partial \vec{\theta}} f\left(\hat{\vec{x}}, \vec{\theta}\right) \\
+  &= \frac{\partial f}{\partial \vec{\theta}} \left(\hat{\vec{x}}, \vec{\theta}\right) + \frac{\partial f}{\partial \vec{x}} \left(\hat{\vec{x}}, \vec{\theta}\right) \frac{\partial \hat{\vec{x}}}{\partial \vec{\theta}} + \frac{\partial \vec{\varepsilon}}{\partial \vec{\theta}}.
+\end{align}
+Rearranging terms gives
+\begin{align}
+  \frac{\partial \hat{\vec{x}}}{\partial \vec{\theta}} &= \left(\mat{I} - \frac{\partial f}{\partial \vec{x}} \left(\hat{\vec{x}}, \vec{\theta}\right)\right)^{-1}\left( \frac{\partial f}{\partial \vec{\theta}} \left(\hat{\vec{x}}, \vec{\theta}\right) + \frac{\partial \vec{\varepsilon}}{\partial \vec{\theta}}\right) \\
+  &\approx \left(\mat{I} - \frac{\partial f}{\partial \vec{x}} \left(\hat{\vec{x}}, \vec{\theta}\right)\right)^{-1} \frac{\partial f}{\partial \vec{\theta}} \left(\hat{\vec{x}}, \vec{\theta}\right). \label{eqn:fp_jac}
+\end{align}
+
+Of course, in an autogradient setting we are interested in computing the vector-Jacobian product instead of the Jacobian itself; left multiplying \cref{eqn:fp_jac} by some vector $\vec{v}$ (and dropping the $\approx$ to simplify notation) results in
+\begin{equation}
+  \vec{v}^T \frac{\partial \hat{\vec{x}}}{\partial \vec{\theta}} = \vec{v}^T \left(\mat{I} - \frac{\partial f}{\partial \vec{x}} \left(\hat{\vec{x}}, \vec{\theta}\right)\right)^{-1} \frac{\partial f}{\partial \vec{\theta}} \left(\hat{\vec{x}}, \vec{\theta}\right).
+\end{equation}
+Defining the intermediate vector $\vec{w}$ like
+\begin{equation}
+  \vec{w}^T = \vec{v}^T \left(\mat{I} - \frac{\partial f}{\partial \vec{x}} \left(\hat{\vec{x}}, \vec{\theta}\right)\right)^{-1},
+\end{equation}
+we can rearrange terms to get
+\begin{align}
+  \vec{w}^T \left(\mat{I} - \frac{\partial f}{\partial \vec{x}} \left(\hat{\vec{x}}, \vec{\theta}\right)\right) &= \vec{v}^T \\
+  \vec{w}^T  - \vec{w}^T\frac{\partial f}{\partial \vec{x}} \left(\hat{\vec{x}}, \vec{\theta}\right) &= \vec{v}^T \\
+  \vec{w}^T &= \vec{v}^T + \vec{w}^T\frac{\partial f}{\partial \vec{x}} \left(\hat{\vec{x}}, \vec{\theta}\right), \label{eqn:fp_w}
+\end{align}
+which is itself a fixed-point iteration that we can find with intermediate vector-Jacobian products of $f$.  Once we find $\vec{w}^T$, \cref{eqn:fp_jac} can be computed by VJP of $f$ wrt $\vec{\theta}$ and $\vec{w}$.
+\section{Nonconvergent Methods}
+In the case that we do not run $f$ to convergence, we will cast the iteration as an ODE like
+\begin{equation}
+  \frac{d\vec{x}}{dt} = f\left(\vec{x}, \vec{\theta}\right) - \vec{x} = g\left(\vec{x}, \vec{\theta}\right). \label{eqn:ode}
+\end{equation}
+Observe that if we integrate \cref{eqn:ode} with an Euler forward timestepper with $\Delta t=1$ and let $\vec{x}^{(k)} = \vec{x}(k)$, we recover the iteration exactly:
+\begin{align}
+  \vec{x}^{(k+1)} &= \vec{x}^{(k)} + \left(\Delta t\right)g\left(\vec{x}^{(k)}, \vec{\theta}\right) \\
+                  &= \vec{x}^{(k)} + f\left(\vec{x}^{(k)}, \vec{\theta}\right) - \vec{x}^{(k)} \\
+                  &= f\left(\vec{x}^{(k)}, \vec{\theta}\right).
+\end{align}
+
+Assume we have run the above for $j$ iterations and have obtained $\vec{x}^{(j)}$ (but not necessarily the intermediate steps).  To differentiate some scalar loss ($\ell$) with respect to $\vec{x}^{(0)}$ and $\vec{\theta}$, we will introduce the adjoint equation
+\begin{equation}
+  \vec{a}(t) = \frac{\partial \ell}{\partial \vec{x}(t)},
+\end{equation}
+with derivative
+\begin{equation}
+  \frac{d\vec{a}(t)}{dt} = -\vec{a}(t)^T \frac{\partial \vec{g}}{\partial \vec{x}}\left(\vec{x}(t), \vec{\theta}\right).
+\end{equation}
+
+Which we can integrate to get
+\begin{align}
+  \frac{d\ell}{d\vec{x}^{(0)}} &= -\int_{j}^{0} \vec{a}\left(t\right)^T \frac{\partial g\left(\vec{x}(t), \vec{\theta}\right)}{\partial \vec{x}} \\
+  \frac{d\ell}{d\vec{\theta}} &= -\int_{j}^{0} \vec{a}\left(t\right)^T \frac{\partial g\left(\vec{x}(t), \vec{\theta}\right)}{\partial \vec{\theta}}.
+\end{align}
+Because we have discarded the intermediate results of $x^{(i)}$, we can also integrate backwards from $x^{(j)}$ at the same time using backwards Euler (see \cref{app:back_euler}) to re-create the sequence of values.
+
+\subsection{Adjoint computation of gradient}
+We can now iteratively solve for the gradients $\frac{\partial \ell}{\partial \vec{x}^{(0)}}$ and $\frac{\partial \ell}{\vec{\theta}}$.  We begin with $\vec{x}^{(j)}$ and $\vec{a}^{(j)}=\vec{a}(j)=\frac{\partial \ell}{\partial \vec{x}^{(j)}}$.  We first compute $x^{(j-1)}$ by implicit Euler, which we will perform the nonlinear solve using a gradient descent.
+
+Define the residual like
+\begin{equation}
+  \vec{r} := \vec{x}^{(k)} - \vec{f}\left(\vec{y}, \vec{\theta}\right),
+\end{equation}
+clearly if $\vec{y}=\vec{x}^{(k-1)}$ then $\vec{r}=\vec{0}$.  To minimize this, we can optimize $\vec{r}^T\vec{r}$ by first taking the gradient wrt $\vec{y}$,
+\begin{align}
+  \gradfn{\vec{y}}{\vec{r}^T\vec{r}} &= -2\vec{x}^T\jac{\vec{y}}{\vec{f}\left(\vec{y}, \vec{\theta}\right)} + \jac{\vec{y}}{\vec{f}\left(\vec{y}, \vec{\theta}\right)}\vec{f}\left(\vec{y}, \vec{\theta}\right) + \vec{f}\left(\vec{y}, \vec{\theta}\right)^T\jac{\vec{y}}{\vec{f}\left(\vec{y}, \vec{\theta}\right)}\\
+                                     &= \left(\vec{f}\left(\vec{y}, \vec{\theta}\right) -2\vec{x}\right)^T\jac{\vec{y}}{\vec{f}\left(\vec{y}, \vec{\theta}\right)} + \jac{\vec{y}}{\vec{f}\left(\vec{y}, \vec{\theta}\right)}\vec{f}\left(\vec{y}, \vec{\theta}\right),
+\end{align}
+then descending on $\vec{y}$ until we find the previous iterate.  At each gradient calculation we must compute 3 vector-Jacobian products: most autogradient software do not natively do Jacobian-vector products and instead implement it as two VJP.
+
+\begin{align}
+  a^{(k-1)} &= a^{(k)} + a^{(k-1)} J(x, \theta) \\
+  a^{(k-1)} - a^{(k-1)} J(x, \theta) - a^{(k)} &= 0 \\
+  a^{(k-1)} \left(I - J(x, \theta)\right) - a^{(k)} &= 0
+\end{align}
+
+\begin{align}
+  \left(a^{(k-1)} \left(I - J(x, \theta)\right) - a^{(k)}\right)^T   \left(a^{(k-1)} \left(I - J(x, \theta)\right) - a^{(k)}\right) \\
+  \left(\left(I - J(x, \theta)\right)^T \left(a^{(k-1)}\right)^T - \left(a^{(k)}\right)^T\right)   \left(a^{(k-1)} \left(I - J(x, \theta)\right) - a^{(k)}\right) \\
+  \left(I - J(x, \theta)\right)^T \left(a^{(k-1)}\right)^T a^{(k-1)} \left(I - J(x, \theta)\right) - 2\left(a^{(k)}\right)^T a^{(k-1)} \left(I - J(x, \theta)\right) + \left(a^{(k)}\right)^Ta^{(k)} \\
+  \left(a^{(k-1)}\right)^T a^{(k-1)} \left(I - J(x, \theta)^T\right) \left(I - J(x, \theta)\right) - 2\left(a^{(k)}\right)^T a^{(k-1)} \left(I - J(x, \theta)\right) + \left(a^{(k)}\right)^Ta^{(k)}
+\end{align}
+
+% \begin{align}
+%   \text{grad} = 2a^{(k-1)} \left(I - J(x, \theta)^T\right) \left(I - J(x, \theta)\right) - 2\left(a^{(k)}\right)^T \a^{(k-1)} \left(I - J(x, \theta)\right) \\
+% \end{align}
+\appendix
+\section{Misc}
+\subsection{Backward Euler, backwards is forward Euler, forwards, but backwards}\label{app:back_euler}
+Let $x(t)$ be an ODE whose derivative is defined by
+\begin{equation}
+  \frac{dx}{dt} = f\left(x, t\right).
+\end{equation}
+
+If we time-step forward from $t^{(0)}$ to $t^{(0)}$ starting from $x^{(0)}=x(0)$ using forward Euler and obtain the intermediate sequence of $x(t)$ values
+\begin{equation}
+  x^{(1)}, x^{(1)}, \ldots, x^{(j)},
+\end{equation}
+we will obtain the same sequence of values if we time-step backward from $t^{(1)}$ to $t^{(0)}$ starting from $x^{(j)}=x\left(t^{(1)}\right)$ by using backward Euler.
+\begin{proof}
+  Denote the step size taken in both forward and backward Euler by $\Delta t$.  Each forward iteration is defined by
+  \begin{equation}
+    x^{(k+1)}_{\text{fwd}} = x^{(k)}_{\text{fwd}} + \Delta t f\left(x^{(k)}_{\text{fwd}}\right), \label{eqn:ef}
+  \end{equation}
+  with each backward iteration being equivalently defined by
+  \begin{equation}
+    x^{(k)}_{\text{bwd}} = x^{(k+1)}_{\text{bwd}} - \Delta t f\left(x^{(k)}_{\text{bwd}}\right). \label{eqn:eb}
+  \end{equation}
+  Assuming we start the backward iteration from the final result obtained by the forward iteration, we have $x^{(j)}_{\text{bwd}} = x^{(j)}_{\text{fwd}}$.  Inductively, we get
+  \begin{equation}
+    x^{(k)}_{\text{bwd}} = x^{(k+1)}_{\text{fwd}} - \Delta t f\left(x^{(k)}_{\text{bwd}}\right),
+  \end{equation}
+  or, with some rearranging and from \cref{eqn:ef},
+  \begin{equation}
+      x^{(k)}_{\text{bwd}} + \Delta t f\left(x^{(k)}_{\text{bwd}}\right) = x^{(k+1)}_{\text{fwd}} = x^{(k)}_{\text{fwd}} + \Delta t f\left(x^{(k)}_{\text{fwd}}\right).
+  \end{equation}
+\end{proof}
+\bibliographystyle{siam}
+\bibliography{background}
+\end{document}

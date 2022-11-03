@@ -74,3 +74,29 @@ eprint = {
 ,
     abstract = { This survey provides an overview of higher-order tensor decompositions, their applications, and available software. A tensor is a multidimensional or N-way array. Decompositions of higher-order tensors (i.e., N-way arrays with \$N \geq 3\$) have applications in psycho-metrics, chemometrics, signal processing, numerical linear algebra, computer vision, numerical analysis, data mining, neuroscience, graph analysis, and elsewhere. Two particular tensor decompositions can be considered to be higher-order extensions of the matrix singular value decomposition: CANDECOMP/PARAFAC (CP) decomposes a tensor as a sum of rank-one tensors, and the Tucker decomposition is a higher-order form of principal component analysis. There are many other tensor decompositions, including INDSCAL, PARAFAC2, CANDELINC, DEDICOM, and PARATUCK2 as well as nonnegative variants of all of the above. The N-way Toolbox, Tensor Toolbox, and Multilinear Engine are examples of software packages for working with tensors. }
 }
+
+@article{Chen2018,
+   abstract = {We introduce a new family of deep neural network models. Instead of
+specifying a discrete sequence of hidden layers, we parameterize the derivative
+of the hidden state using a neural network. The output of the network is
+computed using a black-box differential equation solver. These continuous-depth
+models have constant memory cost, adapt their evaluation strategy to each
+input, and can explicitly trade numerical precision for speed. We demonstrate
+these properties in continuous-depth residual networks and continuous-time
+latent variable models. We also construct continuous normalizing flows, a
+generative model that can train by maximum likelihood, without partitioning or
+ordering the data dimensions. For training, we show how to scalably
+backpropagate through any ODE solver, without access to its internal
+operations. This allows end-to-end training of ODEs within larger models.},
+   author = {Ricky T. Q. Chen and Yulia Rubanova and Jesse Bettencourt and David Duvenaud},
+   doi = {10.48550/arxiv.1806.07366},
+   issn = {20385757},
+   issue = {NeurIPS},
+   journal = {NIPs},
+   month = {6},
+   pages = {31-60},
+   title = {Neural Ordinary Differential Equations},
+   volume = {109},
+   url = {https://arxiv.org/abs/1806.07366v5},
+   year = {2018},
+}
