@@ -24,7 +24,7 @@ def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
     cumsum = torch.cumsum(nnz, 0)
     cumsum = torch.cat((torch.tensor([0], device=values.device), cumsum))
 
-    return values.float(), col_ind, cumsum
+    return values, col_ind, cumsum
 
 
 class spgemv(torch.autograd.Function):
@@ -33,36 +33,30 @@ class spgemv(torch.autograd.Function):
     '''
 
     @staticmethod
-    def forward(ctx, A_shape, alpha, A_data, A_col_ind, A_rowptr, x, beta, y):
-        Ax, z = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], alpha,
-                                               A_data, A_col_ind, A_rowptr, x, beta, y)
+    def forward(ctx, A_shape, A_data, A_col_ind, A_rowptr, x):
+        if A_data.type() != x.type():
+            raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {x.type()}, respectively.')
 
-        ctx.save_for_backward(Ax, x, y, A_data, A_col_ind, A_rowptr)
+        Ax = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], A_data, A_col_ind, A_rowptr, x)
+
+        ctx.save_for_backward(Ax, x, A_data, A_col_ind, A_rowptr)
         ctx.shape = A_shape
-        ctx.alpha = alpha
-        ctx.beta = beta
 
-        return z
+        return Ax
 
     @staticmethod
     def backward(ctx, df_dz):
-        Ax, x, y, A_data, A_col_ind, A_rowptr = ctx.saved_tensors
+        Ax, x, A_data, A_col_ind, A_rowptr = ctx.saved_tensors
         A_shape = ctx.shape
-        alpha = ctx.alpha
-        beta = ctx.beta
 
-        grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1], alpha,
-                                                         A_data, A_col_ind, A_rowptr, x, beta, y)
+        grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1],
+                                                         A_data, A_col_ind, A_rowptr, x)
 
         return (None, # A_shape
-                torch.sum(df_dz * Ax), # alpha
                 grad_A, # A_data
                 None, # A_col_ind
                 None, # A_rowptr
-                grad_x, # x
-                torch.sum(df_dz * y), # beta
-                df_dz * beta) # y
-
+                grad_x) # x
 
 class spgemm(torch.autograd.Function):
     '''
@@ -74,7 +68,11 @@ class spgemm(torch.autograd.Function):
                 A_shape, A_data, A_indices, A_indptr,
                 B_shape, B_data, B_indices, B_indptr):
 
-        assert(A_shape[1] == B_shape[0])
+        if A_data.type() != B_data.type():
+            raise RuntimeError(f'Matrices should be same data type, got {A_data.type()} and {B_data.type()}, respectively.')
+        if (A_shape[1] != B_shape[0]):
+            raise RuntimeError(f'Incompatible matrix shapes for multiplication.  Got {A_shape} and {B_shape}.')
+
         C_shape = (A_shape[0], B_shape[1])
 
         C_data, C_indices, C_indptr = numml_torch_cpp.spgemm_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
@@ -271,6 +269,9 @@ class splincomb(torch.autograd.Function):
     def forward(ctx, shape,
                 alpha, A_data, A_col_ind, A_rowptr,
                 beta,  B_data, B_col_ind, B_rowptr):
+
+        if A_data.type() != B_data.type():
+            raise RuntimeError(f'Matrices should be same data type, got {A_data.type()} and {B_data.type()}, respectively.')
 
         C_data, C_col_ind, C_rowptr = numml_torch_cpp.splincomb_forward(shape[0], shape[1],
                                                                         alpha, A_data, A_col_ind, A_rowptr,
@@ -695,7 +696,7 @@ class SparseCSRTensor(object):
                 self.shape = arg1.shape
         elif isinstance(arg1, scisp.spmatrix):
             arg_csr = arg1.tocsr()
-            self.data = torch.Tensor(arg_csr.data.copy()).float()
+            self.data = torch.Tensor(arg_csr.data.copy())
             self.indices = torch.Tensor(arg_csr.indices.copy()).long()
             self.indptr = torch.Tensor(arg_csr.indptr.copy()).long()
             self.shape = arg_csr.shape
@@ -740,9 +741,7 @@ class SparseCSRTensor(object):
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
 
     def spmv(self, x):
-        y = spgemv.apply(self.shape,
-                          torch.tensor(1.).to(x.device), self.data, self.indices, self.indptr, x.squeeze(),
-                          torch.tensor(0.).to(x.device), torch.zeros(self.shape[0]).to(x.device))
+        y = spgemv.apply(self.shape, self.data, self.indices, self.indptr, x.squeeze())
         y = utils.unsqueeze_like(y, x)
         return y
 
@@ -1072,6 +1071,12 @@ class SparseCSRTensor(object):
 
     def cpu(self):
         return self.to('cpu')
+
+    def float(self):
+        return SparseCSRTensor((self.data.float(), self.indices, self.indptr), self.shape)
+
+    def double(self):
+        return SparseCSRTensor((self.data.double(), self.indices, self.indptr), self.shape)
 
 
 class LinearOperator(object):

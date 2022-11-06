@@ -51,11 +51,11 @@ __global__ void spgemv_forward_cuda_kernel_matvec(
     z_out[row] = z_i;
 }
 
-FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
+FUNC_IMPL_CUDA(torch::Tensor,
                spgemv_forward,
-               int A_rows, int A_cols, torch::Tensor alpha,
+               int A_rows, int A_cols,
                torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-               torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
+               torch::Tensor x) {
 
     auto options = torch::TensorOptions()
         .dtype(A_data.dtype())
@@ -74,7 +74,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(x, scalar_t), tensor_acc(Ax, scalar_t));
     }));
 
-    return {Ax, alpha * Ax + beta * y};
+    return Ax;
 }
 
 /**
@@ -83,7 +83,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
  */
 template <typename scalar_t>
 __global__ void spgemv_backward_cuda_kernel_grad_A(
-    int A_rows, int A_cols, scalar_t alpha,
+    int A_rows, int A_cols,
     const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_z,
     torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_A,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_col_ind,
@@ -99,25 +99,8 @@ __global__ void spgemv_backward_cuda_kernel_grad_A(
 
     for (int64_t i = A_rowptr[row]; i < A_rowptr[row + 1]; i++) {
         int64_t col = A_col_ind[i];
-        grad_A[i] = alpha * grad_z[row] * x[col];
+        grad_A[i] = grad_z[row] * x[col];
     }
-}
-
-
-__device__ int64_t kernel_indices_binsearch(int64_t i_start, int64_t i_end, int64_t i_search,
-                                            const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> indices) {
-    int64_t i_mid;
-    while (i_start <= i_end) {
-        i_mid = (i_start + i_end) / 2;
-        if (indices[i_mid] < i_search) {
-            i_start = i_mid + 1;
-        } else if (indices[i_mid] > i_search) {
-            i_end = i_mid - 1;
-        } else if (indices[i_mid] == i_search) {
-            return i_mid;
-        }
-    }
-    return -1;
 }
 
 /**
@@ -130,14 +113,14 @@ __device__ int64_t kernel_indices_binsearch(int64_t i_start, int64_t i_end, int6
  */
 template <typename scalar_t>
 __global__ void spgemv_backward_cuda_kernel_grad_x_atomic(
-    int A_rows, int A_cols, scalar_t alpha,
+    int A_rows, int A_cols,
     const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_z,
     const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_col_ind,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_rowptr,
     scalar_t* __restrict__ grad_x) {
 
-    /* Compute grad_x = alpha * A^T grad_z */
+    /* Compute grad_x = A^T grad_z */
 
     const int64_t k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= A_rows) {
@@ -152,9 +135,9 @@ __global__ void spgemv_backward_cuda_kernel_grad_x_atomic(
 
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                spgemv_backward,
-               torch::Tensor grad_z, int A_rows, int A_cols, torch::Tensor alpha,
+               torch::Tensor grad_z, int A_rows, int A_cols,
                torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-               torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
+               torch::Tensor x) {
 
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
@@ -164,7 +147,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     const dim3 grad_A_blocks((grad_A_threads + threads_per_block - 1) / threads_per_block, 1);
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_backward_cuda", ([&] {
         spgemv_backward_cuda_kernel_grad_A<scalar_t><<<grad_A_blocks, threads_per_block, 0, main_stream>>>(
-            A_rows, A_cols, alpha.item<scalar_t>(),
+            A_rows, A_cols,
             tensor_acc(grad_z, scalar_t), tensor_acc(grad_A, scalar_t),
             tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t),
             tensor_acc(x, scalar_t));
@@ -181,7 +164,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
         const int grad_x_threads = A_rows;
         const dim3 grad_x_blocks((grad_x_threads + threads_per_block - 1) / threads_per_block, 1);
         spgemv_backward_cuda_kernel_grad_x_atomic<scalar_t><<<grad_x_blocks, threads_per_block, 0, main_stream>>>(
-            A_rows, A_cols, alpha.item<scalar_t>(),
+            A_rows, A_cols,
             tensor_acc(grad_z, scalar_t),
             tensor_acc(A_data, scalar_t), tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t),
             grad_x_ary);
@@ -629,16 +612,6 @@ struct coordinate_pair_t {
 
     __device__ bool operator==(const coordinate_pair_t& other) const {
         return (row == other.row && col == other.col);
-    }
-};
-
-/**
- * Hash for the above pair type, consisting of a bitwise or between hashes of each entry.
- */
-struct coordinate_pair_hash_t {
-    __device__ uint32_t operator()(const coordinate_pair_t& c) {
-        auto hash = cuco::detail::MurmurHash3_32<int64_t>();
-        return hash(c.row) ^ hash(c.col);
     }
 };
 
@@ -1350,4 +1323,15 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     grad_C = spdmm_forward_cuda(A_cols, A_rows, At[0], At[1], At[2], grad_C);
 
     return {grad_A, grad_C};
+}
+
+
+FUNC_IMPL_CUDA(torch::Tensor,
+              sptrsv_forward,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              bool lower, bool unit, torch::Tensor b) {
+
+    throw std::runtime_error("sptrsv_forward is not implemented on CUDA.");
+    return torch::Tensor{};
 }
