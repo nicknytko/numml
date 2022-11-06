@@ -259,6 +259,36 @@ def sstrsv(upper, unit, A_shape, A_data, A_col_ind, A_rowptr, b):
     return x
 
 
+class sptrsv(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, shape, A_data, A_indices, A_indptr, lower, unit, b):
+        if shape[0] != shape[1]:
+            raise RuntimeError(f'Expected square matrix for triangular solve, got {shape[0]} x {shape[1]}.')
+        if A_data.type() != b.type():
+            raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {b.type()}, respectively.')
+
+        x = numml_torch_cpp.sptrsv_forward(shape[0], shape[1], A_data, A_indices, A_indptr, lower, unit, b)
+        ctx.save_for_backward(A_data, A_indices, A_indptr, b, x)
+        ctx.lower = lower
+        ctx.unit = unit
+
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        A_data, A_indices, A_indptr, b, x = ctx.saved_tensors
+        lower = ctx.lower
+        unit = ctx.lower
+
+        return (None, # shape
+                None, # A_data
+                None, # A_indices
+                None, # A_indptr
+                None, # lower
+                None, # unit
+                None) # b
+
+
 class splincomb(torch.autograd.Function):
     '''
     Computes the linear combination of two sparse matrices like
@@ -765,7 +795,7 @@ class SparseCSRTensor(object):
           Solution to the matrix equation Ax = b, where A is triangular.
         '''
 
-        return sstrsv(upper, unit, self.shape, self.data, self.indices, self.indptr, b)
+        return sptrsv.apply(self.shape, self.data, self.indices, self.indptr, not upper, unit, b)
 
     def spspmm(self, othr):
         assert(self.shape[1] == othr.shape[0])

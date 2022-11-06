@@ -1325,6 +1325,95 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     return {grad_A, grad_C};
 }
 
+/**
+ * Computes the lower triangular solve of
+ * Lx = b
+ * based on the write-first CapelliniSpTRSV algorithm in
+ * "CapelliniSpTRSV: A Thread-Level Synchronization-Free Sparse Triangular Solve on GPUs", Su et al
+ *
+ * Indexed on rows of L.
+ */
+template <typename scalar_t>
+__global__ void cuda_kernel_sptrsv_forward_lower(const int64_t A_rows, const int64_t A_cols,
+                                                 const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+                                                 const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+                                                 const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+                                                 const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> b,
+                                                 torch::PackedTensorAccessor64<double, 1, torch::RestrictPtrTraits> x,
+                                                 bool unit,
+                                                 volatile bool* __restrict__ value_available) {
+
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= A_rows) {
+        return;
+    }
+
+    double acc = 0.;
+    int64_t j = A_indptr[i];
+    int64_t col = A_indices[j];
+    while (j < A_indptr[i+1]) {
+        /* If we hit the diagonal then we're done and can update our entry in the output */
+        if (col == i) {
+            if (unit) {
+                x[i] = static_cast<double>(b[i]) - acc;
+            } else {
+                x[i] = (static_cast<double>(b[i]) - acc) / static_cast<double>(A_data[j]);
+            }
+            __threadfence();
+            value_available[i] = true;
+            break;
+        }
+
+        /* Implicitly busywait until we can accumulate the entire row. */
+        while (value_available[col] && col != i) {
+            acc += static_cast<double>(A_data[j]) * x[col];
+            ++j;
+            col = A_indices[j];
+        }
+    }
+}
+
+
+template <typename scalar_t>
+__global__ void cuda_kernel_sptrsv_forward_upper(const int64_t A_rows, const int64_t A_cols,
+                                                 const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+                                                 const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+                                                 const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+                                                 const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> b,
+                                                 torch::PackedTensorAccessor64<double, 1, torch::RestrictPtrTraits> x,
+                                                 bool unit,
+                                                 volatile bool* __restrict__ value_available) {
+
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= A_rows) {
+        return;
+    }
+
+    double acc = 0.;
+    int64_t j = A_indptr[i+1] - 1;
+    int64_t col = A_indices[j];
+    while (j >= A_indptr[i]) {
+        /* If we hit the diagonal then we're done and can update our entry in the output */
+        if (col == i) {
+            if (unit) {
+                x[i] = static_cast<double>(b[i]) - acc;
+            } else {
+                x[i] = (static_cast<double>(b[i]) - acc) / static_cast<double>(A_data[j]);
+            }
+            __threadfence();
+            value_available[i] = true;
+            break;
+        }
+
+        /* Implicitly busywait until we can accumulate the entire row. */
+        while (value_available[col] && col != i) {
+            acc += static_cast<double>(A_data[j]) * x[col];
+            --j;
+            col = A_indices[j];
+        }
+    }
+}
+
 
 FUNC_IMPL_CUDA(torch::Tensor,
               sptrsv_forward,
@@ -1332,6 +1421,28 @@ FUNC_IMPL_CUDA(torch::Tensor,
               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
               bool lower, bool unit, torch::Tensor b) {
 
-    throw std::runtime_error("sptrsv_forward is not implemented on CUDA.");
-    return torch::Tensor{};
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    auto options = torch::TensorOptions()
+        .dtype(torch::kFloat64)
+        .device(A_data.device().type(), A_data.device().index());
+    torch::Tensor x_dbl = torch::empty({A_rows}, options);
+
+    bool* value_available;
+    cudaMalloc(&value_available, sizeof(bool) * A_rows);
+    cudaMemsetAsync(value_available, 0, sizeof(bool) * A_rows, main_stream);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_forward_cuda", ([&] {
+        if (lower) {
+            cuda_kernel_sptrsv_forward_lower<<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
+                tensor_acc(b, scalar_t), tensor_acc(x_dbl, double), unit, value_available);
+        } else {
+            cuda_kernel_sptrsv_forward_upper<<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
+                tensor_acc(b, scalar_t), tensor_acc(x_dbl, double), unit, value_available);
+        }
+    }));
+
+    cudaFree(value_available);
+    return x_dbl.to(A_data.dtype());
 }
