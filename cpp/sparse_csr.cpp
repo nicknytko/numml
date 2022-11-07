@@ -3,29 +3,27 @@
 /** @file This file contains contains stub code for each function that will dispatch
     to either a CPU-based implementation or a CUDA-optimized version. */
 
-FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+FUNC_IMPL_DISPATCH(torch::Tensor,
                    spgemv_forward,
-                   int A_rows, int A_cols, torch::Tensor alpha,
+                   int A_rows, int A_cols,
                    torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-                   torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
+                   torch::Tensor x) {
     if (is_cuda(A_data)) {
-        return spgemv_forward_cuda(A_rows, A_cols, alpha, A_data, A_col_ind, A_rowptr, x, beta, y);
+        return spgemv_forward_cuda(A_rows, A_cols, A_data, A_col_ind, A_rowptr, x);
     } else {
-        return spgemv_forward_cpu(A_rows, A_cols, alpha, A_data, A_col_ind, A_rowptr, x, beta, y);
+        return spgemv_forward_cpu(A_rows, A_cols, A_data, A_col_ind, A_rowptr, x);
     }
 }
 
 FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
                    spgemv_backward,
-                   torch::Tensor grad_z, int A_rows, int A_cols, torch::Tensor alpha,
+                   torch::Tensor grad_z, int A_rows, int A_cols,
                    torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-                   torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
+                   torch::Tensor x) {
     if (is_cuda(grad_z)) {
-        return spgemv_backward_cuda(grad_z, A_rows, A_cols, alpha, A_data, A_col_ind, A_rowptr,
-                                    x, beta, y);
+        return spgemv_backward_cuda(grad_z, A_rows, A_cols, A_data, A_col_ind, A_rowptr, x);
     } else {
-        return spgemv_backward_cpu(grad_z, A_rows, A_cols, alpha, A_data, A_col_ind, A_rowptr,
-                                   x, beta, y);
+        return spgemv_backward_cpu(grad_z, A_rows, A_cols, A_data, A_col_ind, A_rowptr, x);
     }
 }
 
@@ -158,6 +156,36 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
     }
 }
 
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   sptrsv_forward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   bool lower, bool unit, torch::Tensor b) {
+    if (is_cuda(A_data)) {
+        return sptrsv_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr,
+                                   lower, unit, b);
+    } else {
+        return sptrsv_forward_cpu(A_rows, A_cols, A_data, A_indices, A_indptr,
+                                  lower, unit, b);
+    }
+}
+
+FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+                   sptrsv_backward,
+                   torch::Tensor grad_x, torch::Tensor x,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   bool lower, bool unit, torch::Tensor b) {
+    if (is_cuda(A_data)) {
+        return sptrsv_backward_cuda(grad_x, x, A_rows, A_cols,
+                                    A_data, A_indices, A_indptr, lower, unit, b);
+    } else {
+        return sptrsv_backward_cpu(grad_x, x, A_rows, A_cols,
+                                   A_data, A_indices, A_indptr, lower, unit, b);
+
+    }
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
     m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
@@ -173,4 +201,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("spdmm_forward", &spdmm_forward, "Sparse times dense matrix forward");
     m.def("spdmm_backward", &spdmm_backward, "Sparse times dense matrix backward");
+
+    m.def("sptrsv_forward", &sptrsv_forward, "Sparse triangular solve");
+    m.def("sptrsv_backward", &sptrsv_backward, "Sparse times dense matrix backward");
 }

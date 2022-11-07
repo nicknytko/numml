@@ -29,17 +29,17 @@ inline bool is_cuda(const torch::Tensor& x) {
 }
 
 /* Sparse GEMV */
-FUNC_DEF(std::vector<torch::Tensor>,
+FUNC_DEF(torch::Tensor,
          spgemv_forward,
-         int A_rows, int A_cols, torch::Tensor alpha,
+         int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-         torch::Tensor x, torch::Tensor beta, torch::Tensor y);
+         torch::Tensor x);
 
 FUNC_DEF(std::vector<torch::Tensor>,
          spgemv_backward,
-         torch::Tensor grad_z, int A_rows, int A_cols, torch::Tensor alpha,
+         torch::Tensor grad_z, int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-         torch::Tensor x, torch::Tensor beta, torch::Tensor y);
+         torch::Tensor x);
 
 /* Sparse GEMM */
 FUNC_DEF(std::vector<torch::Tensor>,
@@ -89,5 +89,19 @@ FUNC_DEF(std::vector<torch::Tensor>,
          int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
          torch::Tensor B, torch::Tensor grad_C);
+
+/* Sparse triangular solve */
+FUNC_DEF(torch::Tensor,
+         sptrsv_forward,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         bool lower, bool unit, torch::Tensor b);
+
+FUNC_DEF(std::vector<torch::Tensor>,
+         sptrsv_backward,
+         torch::Tensor grad_x, torch::Tensor x,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         bool lower, bool unit, torch::Tensor b);
 
 #endif

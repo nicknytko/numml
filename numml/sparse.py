@@ -6,6 +6,10 @@ import numml.utils as utils
 
 
 def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
+    '''
+    Conversion from COO to CSR format
+    '''
+
     if sort:
         _, col_sort = torch.sort(col_ind)
 
@@ -24,7 +28,7 @@ def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
     cumsum = torch.cumsum(nnz, 0)
     cumsum = torch.cat((torch.tensor([0], device=values.device), cumsum))
 
-    return values.float(), col_ind, cumsum
+    return values, col_ind, cumsum
 
 
 class spgemv(torch.autograd.Function):
@@ -33,35 +37,30 @@ class spgemv(torch.autograd.Function):
     '''
 
     @staticmethod
-    def forward(ctx, A_shape, alpha, A_data, A_col_ind, A_rowptr, x, beta, y):
-        Ax, z = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], alpha,
-                                               A_data, A_col_ind, A_rowptr, x, beta, y)
+    def forward(ctx, A_shape, A_data, A_col_ind, A_rowptr, x):
+        if A_data.type() != x.type():
+            raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {x.type()}, respectively.')
 
-        ctx.save_for_backward(Ax, x, y, A_data, A_col_ind, A_rowptr)
+        Ax = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], A_data, A_col_ind, A_rowptr, x)
+
+        ctx.save_for_backward(Ax, x, A_data, A_col_ind, A_rowptr)
         ctx.shape = A_shape
-        ctx.alpha = alpha
-        ctx.beta = beta
 
-        return z
+        return Ax
 
     @staticmethod
     def backward(ctx, df_dz):
-        Ax, x, y, A_data, A_col_ind, A_rowptr = ctx.saved_tensors
+        Ax, x, A_data, A_col_ind, A_rowptr = ctx.saved_tensors
         A_shape = ctx.shape
-        alpha = ctx.alpha
-        beta = ctx.beta
 
-        grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1], alpha,
-                                                         A_data, A_col_ind, A_rowptr, x, beta, y)
+        grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1],
+                                                         A_data, A_col_ind, A_rowptr, x)
 
         return (None, # A_shape
-                torch.sum(df_dz * Ax), # alpha
                 grad_A, # A_data
                 None, # A_col_ind
                 None, # A_rowptr
-                grad_x, # x
-                torch.sum(df_dz * y), # beta
-                df_dz * beta) # y
+                grad_x) # x
 
 
 class spgemm(torch.autograd.Function):
@@ -74,7 +73,11 @@ class spgemm(torch.autograd.Function):
                 A_shape, A_data, A_indices, A_indptr,
                 B_shape, B_data, B_indices, B_indptr):
 
-        assert(A_shape[1] == B_shape[0])
+        if A_data.type() != B_data.type():
+            raise RuntimeError(f'Matrices should be same data type, got {A_data.type()} and {B_data.type()}, respectively.')
+        if (A_shape[1] != B_shape[0]):
+            raise RuntimeError(f'Incompatible matrix shapes for multiplication.  Got {A_shape} and {B_shape}.')
+
         C_shape = (A_shape[0], B_shape[1])
 
         C_data, C_indices, C_indptr = numml_torch_cpp.spgemm_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
@@ -109,156 +112,43 @@ class spgemm(torch.autograd.Function):
                 None) # B_indptr
 
 
-class ScaleVecPrimitive(torch.autograd.Function):
+class sptrsv(torch.autograd.Function):
     '''
-    Atomic torch function for scaling a specific entry of a vector, while keeping
-    all other entries the same.
-    '''
-
-    @staticmethod
-    def forward(ctx, x, i, alpha):
-        '''
-        Forward pass
-
-        Parameters
-        ----------
-        x : torch.Tensor
-          Vector to perform the operation on
-        i : integer
-          Entry index to scale
-        alpha : float
-          Amount to scale the entry by
-
-        Returns
-        -------
-        z : torch.Tensor
-          Scaled vector with same shape as x
-        '''
-
-        z = torch.clone(x)
-        z[i] = z[i] * alpha
-        ctx.alpha = alpha
-        ctx.i = i
-        ctx.xi = x[i].detach()
-        return z
-
-    @staticmethod
-    def backward(ctx, z_grad):
-        '''
-        Backward pass
-
-        Parameters
-        ----------
-        z_grad : torch.Tensor
-          Vector gradient of scalar loss function wrt z
-
-        Returns
-        -------
-        x_grad : torch.Tensor
-          Vector gradient of scalar loss function wrt x
-        i_grad : None
-          Gradient of scalar loss wrt i (does not exist)
-        alpha_grad : float
-          Derivative of scalar loss wrt alpha
-        '''
-
-        alpha = ctx.alpha
-        i = ctx.i
-
-        x_grad = z_grad.clone()
-        x_grad[i] *= alpha.item()
-
-        return x_grad, None, ctx.xi * z_grad[i]
-
-p_scale = ScaleVecPrimitive.apply
-
-class TriSolveSub(torch.autograd.Function):
-    '''
-    Atomic torch function for computing the vector operation
-
-    x_i = x_i - \\alpha x_j
-
-    Used for the element-wise substitution in triangular solves.
+    Sparse triangular solve with single right-hand-side.
     '''
 
     @staticmethod
-    def forward(ctx, x, i, j, Mij):
-        z = torch.clone(x)
-        z[i] = z[i] - Mij * x[j]
+    def forward(ctx, shape, A_data, A_indices, A_indptr, lower, unit, b):
+        if shape[0] != shape[1]:
+            raise RuntimeError(f'Expected square matrix for triangular solve, got {shape[0]} x {shape[1]}.')
+        if A_data.type() != b.type():
+            raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {b.type()}, respectively.')
 
-        ctx.Mij = Mij.detach()
-        ctx.i = i
-        ctx.j = j
-        ctx.xj = x[j].detach()
-        return z
+        x = numml_torch_cpp.sptrsv_forward(shape[0], shape[1], A_data, A_indices, A_indptr, lower, unit, b)
+        ctx.save_for_backward(A_data, A_indices, A_indptr, b, x)
+        ctx.lower = lower
+        ctx.unit = unit
+        ctx.shape = shape
+
+        return x
 
     @staticmethod
-    def backward(ctx, x_grad):
-        i, j = ctx.i, ctx.j
-        mij = ctx.Mij
+    def backward(ctx, grad_x):
+        A_data, A_indices, A_indptr, b, x = ctx.saved_tensors
+        lower = ctx.lower
+        unit = ctx.unit
+        shape = ctx.shape
 
-        grad_x = torch.clone(x_grad)
-        grad_x[j] += -mij * x_grad[i]
+        grad_A_data, grad_b = numml_torch_cpp.sptrsv_backward(grad_x, x, shape[0], shape[1],
+                                                              A_data, A_indices, A_indptr, lower, unit, b)
 
-        return grad_x, None, None, -ctx.xj * x_grad[i]
-p_trisolvesub = TriSolveSub.apply
-
-
-def sstrsv(upper, unit, A_shape, A_data, A_col_ind, A_rowptr, b):
-    '''
-    Sparse Solve Triangular System with Single Vector
-    Solves an upper or lower triangular system with a single right-hand-side vector.  The
-    triangular system can optionally have unit diagonal.
-    '''
-
-    rows, cols = A_shape
-    assert(rows == cols)
-    x = torch.clone(b)
-
-    if upper: # Upper triangular system
-        for row in range(rows-1, -1, -1): # Backwards from last row
-            diag_entry = None
-
-            for i in range(A_rowptr[row+1]-1, A_rowptr[row]-1, -1): # Go backwards from the end of the row
-                col = A_col_ind[i]
-                if col == row and not unit:
-                    diag_entry = A_data[i]
-                elif col > row:
-                    x = p_trisolvesub(x, row, col, A_data[i]) # x[row] -= A_data[i] * x[col]
-                else: # col <= row
-                    break # Stop because we are to the left of the diagonal
-
-            # Rescale entry in x by diagonal entry of A
-            if not unit:
-                if diag_entry is None:
-                    raise RuntimeError('Triangular system is singular: no nonzero entry on diagonal.  Did you mean to pass unit=True?')
-                if diag_entry == 0.:
-                    raise RuntimeError('Triangular system is singular: explicit zero entry given on diagonal.')
-
-                x = p_scale(x, row, 1. / diag_entry) # x[row] /= diag_entry
-    else: # Lower triangular system
-        for row in range(rows): # Forward from first row
-            diag_entry = None
-
-            for i in range(A_rowptr[row], A_rowptr[row + 1]): # Go forward from the start of the row
-                col = A_col_ind[i]
-                if col == row and not unit:
-                    diag_entry = A_data[i]
-                elif col < row:
-                    x = p_trisolvesub(x, row, col, A_data[i])
-                else: # col >= row:
-                    break # Stop because we are to the right of the diagonal
-
-            # Rescale entry in x by diagonal entry of A
-            if not unit:
-                if diag_entry is None:
-                    raise RuntimeError('Triangular system is singular: no nonzero entry on diagonal.  Did you mean to pass unit=True?')
-                if diag_entry == 0.:
-                    raise RuntimeError('Triangular system is singular: explicit zero entry given on diagonal.')
-
-                x = p_scale(x, row, 1. / diag_entry)
-
-    return x
+        return (None, # shape
+                grad_A_data, # A_data
+                None, # A_indices
+                None, # A_indptr
+                None, # lower
+                None, # unit
+                grad_b) # b
 
 
 class splincomb(torch.autograd.Function):
@@ -271,6 +161,9 @@ class splincomb(torch.autograd.Function):
     def forward(ctx, shape,
                 alpha, A_data, A_col_ind, A_rowptr,
                 beta,  B_data, B_col_ind, B_rowptr):
+
+        if A_data.type() != B_data.type():
+            raise RuntimeError(f'Matrices should be same data type, got {A_data.type()} and {B_data.type()}, respectively.')
 
         C_data, C_col_ind, C_rowptr = numml_torch_cpp.splincomb_forward(shape[0], shape[1],
                                                                         alpha, A_data, A_col_ind, A_rowptr,
@@ -323,6 +216,7 @@ def eye(N, k=0):
 
     return SparseCSRTensor((vals, (rows, cols)), shape=(N, N))
 
+
 def diag(x, k=0):
     N_k = len(x)
     N = N_k + abs(k)
@@ -360,7 +254,6 @@ def spouter(x, y):
       The product x * y^T as a sparse tensor.
     '''
 
-    # A_ij = x_i y_j
     x_nz = torch.nonzero(x).flatten()
     y_nz = torch.nonzero(y).flatten()
 
@@ -695,7 +588,7 @@ class SparseCSRTensor(object):
                 self.shape = arg1.shape
         elif isinstance(arg1, scisp.spmatrix):
             arg_csr = arg1.tocsr()
-            self.data = torch.Tensor(arg_csr.data.copy()).float()
+            self.data = torch.Tensor(arg_csr.data.copy())
             self.indices = torch.Tensor(arg_csr.indices.copy()).long()
             self.indptr = torch.Tensor(arg_csr.indptr.copy()).long()
             self.shape = arg_csr.shape
@@ -740,9 +633,7 @@ class SparseCSRTensor(object):
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
 
     def spmv(self, x):
-        y = spgemv.apply(self.shape,
-                          torch.tensor(1.).to(x.device), self.data, self.indices, self.indptr, x.squeeze(),
-                          torch.tensor(0.).to(x.device), torch.zeros(self.shape[0]).to(x.device))
+        y = spgemv.apply(self.shape, self.data, self.indices, self.indptr, x.squeeze())
         y = utils.unsqueeze_like(y, x)
         return y
 
@@ -766,7 +657,7 @@ class SparseCSRTensor(object):
           Solution to the matrix equation Ax = b, where A is triangular.
         '''
 
-        return sstrsv(upper, unit, self.shape, self.data, self.indices, self.indptr, b)
+        return sptrsv.apply(self.shape, self.data, self.indices, self.indptr, not upper, unit, b)
 
     def spspmm(self, othr):
         assert(self.shape[1] == othr.shape[0])
@@ -1072,6 +963,12 @@ class SparseCSRTensor(object):
 
     def cpu(self):
         return self.to('cpu')
+
+    def float(self):
+        return SparseCSRTensor((self.data.float(), self.indices, self.indptr), self.shape)
+
+    def double(self):
+        return SparseCSRTensor((self.data.double(), self.indices, self.indptr), self.shape)
 
 
 class LinearOperator(object):

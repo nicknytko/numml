@@ -6,11 +6,11 @@
 
 /* Sparse GEMV */
 
-FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+FUNC_IMPL_CPU(torch::Tensor,
               spgemv_forward,
-              int A_rows, int A_cols, torch::Tensor alpha,
+              int A_rows, int A_cols,
               torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-              torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
+              torch::Tensor x) {
     auto options = torch::TensorOptions()
         .dtype(A_data.dtype())
         .device(A_data.device().type(), A_data.device().index());
@@ -25,7 +25,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
         auto Ax_acc = Ax.accessor<scalar_t, 1>();
 
         for (int64_t row_i = 0; row_i < A_rows; row_i++) {
-            float aij = 0.;
+            scalar_t aij = 0.;
             for (int64_t col_j = A_indptr_acc[row_i]; col_j < A_indptr_acc[row_i + 1]; col_j++) {
                 aij += A_data_acc[col_j] * x_acc[A_indices_acc[col_j]];
             }
@@ -33,14 +33,14 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
         }
     }));
 
-    return {Ax, alpha * Ax + beta * y};
+    return Ax;
 }
 
 FUNC_IMPL_CPU(std::vector<torch::Tensor>,
               spgemv_backward,
-              torch::Tensor grad_z, int A_rows, int A_cols, torch::Tensor alpha,
+              torch::Tensor grad_z, int A_rows, int A_cols,
               torch::Tensor A_data, torch::Tensor A_col_ind, torch::Tensor A_rowptr,
-              torch::Tensor x, torch::Tensor beta, torch::Tensor y) {
+              torch::Tensor x) {
 
     torch::Tensor grad_A = torch::empty_like(A_data);
     torch::Tensor grad_x = torch::zeros_like(x);
@@ -102,7 +102,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
             for (int64_t A_i = A_indptr_acc[A_row]; A_i < A_indptr_acc[A_row + 1]; A_i++) {
                 const int64_t A_col = A_indices_acc[A_i];
 
-                for (int64_t B_i = B_indptr[A_col].item<int64_t>(); B_i < B_indptr[A_col + 1].item<int64_t>(); B_i++) {
+                for (int64_t B_i = B_indptr_acc[A_col]; B_i < B_indptr_acc[A_col + 1]; B_i++) {
                     const int64_t B_col = B_indices_acc[B_i];
 
                     const int64_t i = A_row;
@@ -192,8 +192,8 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
                 scalar_t aij = 0.;
 
                 while (C_row_i < C_row_end && B_row_i < B_row_end) {
-                    int64_t C_col = C_indices[C_row_i].item<int64_t>();
-                    int64_t B_col = B_indices[B_row_i].item<int64_t>();
+                    const int64_t C_col = C_indices_acc[C_row_i];
+                    const int64_t B_col = B_indices_acc[B_row_i];
 
                     if (C_col < B_col) {
                         C_row_i ++;
@@ -580,4 +580,113 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     }));
 
     return {grad_A, grad_B};
+}
+
+FUNC_IMPL_CPU(torch::Tensor,
+              sptrsv_forward,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              bool lower, bool unit, torch::Tensor b) {
+
+    /* Compute in higher precision because single precision leads to catastrophic round-off errors. */
+    auto options = torch::TensorOptions()
+        .dtype(torch::kFloat64)
+        .device(A_data.device().type(), A_data.device().index());
+    torch::Tensor x_dbl = torch::empty({A_rows}, options);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_forward_cpu", ([&] {
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+        const auto b_acc = b.accessor<scalar_t, 1>();
+        auto x_acc = x_dbl.accessor<double, 1>();
+
+        if (lower) {
+            for (int64_t i = 0; i < A_rows; ++i) {
+                double diag = 0.;
+                double acc = 0.0;
+
+                for (int64_t i_i = A_indptr_acc[i]; i_i < A_indptr_acc[i + 1]; ++i_i) {
+                    const int64_t j = A_indices_acc[i_i];
+                    const double Aij = static_cast<double>(A_data_acc[i_i]);
+
+                    if (j > i) {
+                        break;
+                    } else if (j == i) {
+                        diag = Aij;
+                    } else {
+                        acc += Aij * x_acc[j];
+                    }
+                }
+                double xi = static_cast<double>(b_acc[i]) - acc;
+                if (!unit) {
+                    xi /= diag;
+                }
+
+                x_acc[i] = xi;
+            }
+        } else {
+            for (int64_t i = A_rows - 1; i >= 0; --i) {
+                double diag = 0.;
+                double acc = 0.0;
+
+                for (int64_t i_i = A_indptr_acc[i + 1] - 1; i_i >= A_indptr_acc[i]; --i_i) {
+                    const int64_t j = A_indices_acc[i_i];
+                    const double Aij = static_cast<double>(A_data_acc[i_i]);
+
+                    if (j < i) {
+                        break;
+                    } else if (j == i) {
+                        diag = Aij;
+                    } else {
+                        acc += Aij * x_acc[j];
+                    }
+                }
+                double xi = static_cast<double>(b_acc[i]) - acc;
+                if (!unit) {
+                    xi /= diag;
+                }
+
+                x_acc[i] = xi;
+            }
+        }
+    }));
+
+    return x_dbl.to(A_data.dtype());
+}
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              sptrsv_backward,
+              torch::Tensor grad_x, torch::Tensor x,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              bool lower, bool unit, torch::Tensor b) {
+
+    /* Compute grad_b = A^{-T} grad_c */
+    auto At = csr_transpose_forward_cpu(A_rows, A_cols, A_data, A_indices, A_indptr);
+    torch::Tensor At_data = At[0];
+    torch::Tensor At_indices = At[1];
+    torch::Tensor At_indptr = At[2];
+
+    torch::Tensor grad_b = sptrsv_forward_cpu(A_rows, A_cols, At_data, At_indices, At_indptr, !lower, unit, grad_x);
+
+    /* Compute grad_A = -grad_B x^T (*) mask(A) */
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_backward_cpu", ([&] {
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+        const auto x_acc = x.accessor<scalar_t, 1>();
+        const auto grad_b_acc = grad_b.accessor<scalar_t, 1>();
+        auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
+
+        for (int64_t i = 0; i < A_rows; i++) {
+            for (int64_t i_i = A_indptr_acc[i]; i_i < A_indptr_acc[i+1]; i_i++) {
+                const int64_t j = A_indices_acc[i_i];
+                grad_A_data_acc[i_i] = -(grad_b_acc[i] * x_acc[j]);
+            }
+        }
+    }));
+
+    return {grad_A_data, grad_b};
 }
