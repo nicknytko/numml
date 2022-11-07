@@ -97,4 +97,11 @@ FUNC_DEF(torch::Tensor,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
          bool lower, bool unit, torch::Tensor b);
 
+FUNC_DEF(std::vector<torch::Tensor>,
+         sptrsv_backward,
+         torch::Tensor grad_x, torch::Tensor x,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         bool lower, bool unit, torch::Tensor b);
+
 #endif

@@ -170,6 +170,22 @@ FUNC_IMPL_DISPATCH(torch::Tensor,
     }
 }
 
+FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+                   sptrsv_backward,
+                   torch::Tensor grad_x, torch::Tensor x,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   bool lower, bool unit, torch::Tensor b) {
+    if (is_cuda(A_data)) {
+        return sptrsv_backward_cuda(grad_x, x, A_rows, A_cols,
+                                    A_data, A_indices, A_indptr, lower, unit, b);
+    } else {
+        return sptrsv_backward_cpu(grad_x, x, A_rows, A_cols,
+                                   A_data, A_indices, A_indptr, lower, unit, b);
+
+    }
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
     m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
@@ -187,5 +203,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spdmm_backward", &spdmm_backward, "Sparse times dense matrix backward");
 
     m.def("sptrsv_forward", &sptrsv_forward, "Sparse triangular solve");
-    //m.def("spdmm_backward", &spdmm_backward, "Sparse times dense matrix backward");
+    m.def("sptrsv_backward", &sptrsv_backward, "Sparse times dense matrix backward");
 }

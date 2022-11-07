@@ -24,7 +24,7 @@ if 'CUDA_HOME' in os.environ or 'CUDA_PATH' in os.environ:
                                ],
                                extra_compile_args={
                                    'nvcc': ['-std=c++17'],
-                                   'cxx': ['-DCUDA_ENABLED=1', '-O2', '-std=c++17'],
+                                   'cxx': ['-DCUDA_ENABLED=1', '-O2', '-std=c++17', '-w'],
                                })
 
 else:

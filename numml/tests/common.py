@@ -72,6 +72,6 @@ def random_sparse_tri(rows, cols, sparsity, upper, include_diag=True):
     if upper:
         A_d = torch.triu(A_d, 0 if include_diag else 1)
     else:
-        A_d = torch.triu(A_d, 0 if include_diag else -1)
+        A_d = torch.tril(A_d, 0 if include_diag else -1)
 
     return A_d, sp.SparseCSRTensor(A_d)

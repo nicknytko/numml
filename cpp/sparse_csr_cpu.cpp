@@ -632,7 +632,7 @@ FUNC_IMPL_CPU(torch::Tensor,
 
                 for (int64_t i_i = A_indptr_acc[i + 1] - 1; i_i >= A_indptr_acc[i]; --i_i) {
                     const int64_t j = A_indices_acc[i_i];
-                    const scalar_t Aij = static_cast<double>(A_data_acc[i_i]);
+                    const double Aij = static_cast<double>(A_data_acc[i_i]);
 
                     if (j < i) {
                         break;
@@ -653,4 +653,40 @@ FUNC_IMPL_CPU(torch::Tensor,
     }));
 
     return x_dbl.to(A_data.dtype());
+}
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              sptrsv_backward,
+              torch::Tensor grad_x, torch::Tensor x,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              bool lower, bool unit, torch::Tensor b) {
+
+    /* Compute grad_b = A^{-T} grad_c */
+    auto At = csr_transpose_forward_cpu(A_rows, A_cols, A_data, A_indices, A_indptr);
+    torch::Tensor At_data = At[0];
+    torch::Tensor At_indices = At[1];
+    torch::Tensor At_indptr = At[2];
+
+    torch::Tensor grad_b = sptrsv_forward_cpu(A_rows, A_cols, At_data, At_indices, At_indptr, !lower, unit, grad_x);
+
+    /* Compute grad_A = -grad_B x^T (*) mask(A) */
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_backward_cpu", ([&] {
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+        const auto x_acc = x.accessor<scalar_t, 1>();
+        const auto grad_b_acc = grad_b.accessor<scalar_t, 1>();
+        auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
+
+        for (int64_t i = 0; i < A_rows; i++) {
+            for (int64_t i_i = A_indptr_acc[i]; i_i < A_indptr_acc[i+1]; i_i++) {
+                const int64_t j = A_indices_acc[i_i];
+                grad_A_data_acc[i_i] = -(grad_b_acc[i] * x_acc[j]);
+            }
+        }
+    }));
+
+    return {grad_A_data, grad_b};
 }
