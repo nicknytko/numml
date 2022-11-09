@@ -690,3 +690,44 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     return {grad_A_data, grad_b};
 }
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              splu,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    throw std::runtime_error("Sparse LU is not implemented on CPU.");
+    return {};
+}
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              spsolve_backward,
+              torch::Tensor grad_x, torch::Tensor x,
+              int A_rows, int A_cols,
+              torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    /* grad_b = A^{-T} grad_x */
+    torch::Tensor grad_b_y = sptrsv_forward_cpu(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, true, false, grad_x);
+    torch::Tensor grad_b = sptrsv_forward_cpu(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, false, true, grad_b_y);
+
+    /* grad_A = (-grad_b x^T) (*) mask(A) */
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spsolve_backward_cpu", ([&] {
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+        const auto x_acc = x.accessor<scalar_t, 1>();
+        const auto grad_b_acc = grad_b.accessor<scalar_t, 1>();
+        auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
+
+        for (int64_t i = 0; i < A_rows; i++) {
+            for (int64_t i_i = A_indptr_acc[i]; i_i < A_indptr_acc[i+1]; i_i++) {
+                const int64_t j = A_indices_acc[i_i];
+                grad_A_data_acc[i_i] = -(grad_b_acc[i] * x_acc[j]);
+            }
+        }
+    }));
+
+    return {grad_A_data, grad_b};
+}

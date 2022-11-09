@@ -235,6 +235,7 @@ def diag(x, k=0):
 
     return SparseCSRTensor((x, (rows, cols)), shape=(N, N))
 
+
 def spouter(x, y):
     '''
     Returns the outer product of two vectors as a sparse matrix.
@@ -263,6 +264,7 @@ def spouter(x, y):
 
     val = x[row] * y[col]
     return SparseCSRTensor((val, (row, col)), shape=(len(x), len(y)))
+
 
 class tril(torch.autograd.Function):
     @staticmethod
@@ -362,131 +364,48 @@ class triu(torch.autograd.Function):
                 None, # A_rowptr
                 None) # k
 
-class spcolscale(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, shape,
-                A_data, A_col_ind, A_rowptr,
-                row_start, column):
-        B_data = torch.clone(A_data.detach())
-
-        diag_entry = None
-        for i in range(A_rowptr[row_start], A_rowptr[row_start + 1]):
-            if A_col_ind[i] == row_start:
-                diag_entry = A_data[i]
-                break
-
-        if diag_entry is None:
-            raise RuntimeError('Matrix has no explicit diagonal entry!')
-        if diag_entry == 0.:
-            raise RuntimeError('Division by zero: matrix has explicit zero on diagonal.')
-
-        B_data[torch.logical_and(A_col_ind == column, torch.arange(len(A_data), device=A_data.device) >= A_rowptr[row_start+1])] /= diag_entry
-
-        ctx.save_for_backward(A_data, A_col_ind, A_rowptr)
-        ctx.row_start = row_start
-        ctx.column = column
-        ctx.shape = shape
-
-        return B_data, A_col_ind, A_rowptr
-
-    @staticmethod
-    def backward(ctx, grad_B_data, _grad_B_col_ind, _grad_B_rowptr):
-        A_data, A_col_ind, A_rowptr = ctx.saved_tensors
-        row_start = ctx.row_start
-        column = ctx.column
-        shape = ctx.shape
-
-        grad_A = torch.clone(grad_B_data)
-        kk_entry = None
-        for row in range(row_start, shape[0]):
-            for i in range(A_rowptr[row], A_rowptr[row + 1]):
-                col = A_col_ind[i]
-
-                if col == column:
-                    if row == row_start:
-                        kk_entry = i
-                    else:
-                        grad_A[i] /= A_data[kk_entry]
-                        grad_A[kk_entry] -= grad_B_data[i] * (A_data[i] / (A_data[kk_entry]) ** 2.)
-                    break
-
-        return (None,   # shape
-                grad_A, # A_data
-                None,   # A_col_ind
-                None,   # A_rowptr
-                None,   # row_start
-                None)   # column
 
 def splu(A):
     '''
-    Sparse LU factorization *without* pivoting
+    Compute the sparse LU factorization of an invertible matrix (without pivoting).
 
-    Parameters
-    ----------
-    A : SparseCSRTensor
-      Sparse tensor on which to perform the LU factorization
-
-    Returns
-    -------
-    M : SparseCSRTensor
-      Sparse tensor M in which entries below the main diagonal correspond
-      to 'L', while entries including and above the main diagonal correspond
-      to 'U'
+    Note that this does not propagate gradient information.  If you need a solve with
+    gradients, use spsolve.
     '''
 
-    # Helper to do the column scaling
-    def apply_spcolscale(A, k):
-        B_data, B_indices, B_indptr = spcolscale.apply(A.shape, A.data, A.indices, A.indptr, k, k)
-        return SparseCSRTensor((B_data, B_indices, B_indptr), shape=A.shape)
-
-    M = A.copy()
-    for k in range(A.shape[0] - 1):
-        M = apply_spcolscale(M, k)
-        M_row = torch.zeros(A.shape[1])
-        M_col = torch.zeros(A.shape[0])
-
-        # Get row of M
-        for i in range(M.indptr[k], M.indptr[k+1]):
-            col = M.indices[i]
-            if col > k:
-                M_row[col] = M.data[i]
-
-        # Get col of M
-        for row in range(k+1, M.shape[0]):
-            for i in range(M.indptr[row], M.indptr[row + 1]):
-                col = M.indices[i]
-                if col == k:
-                    M_col[row] = M.data[i]
-                    break
-
-        M = M - spouter(M_col, M_row)
-    return M
+    M_data, M_indices, M_indptr = numml_torch_cpp.splu(A.shape[0], A.shape[1], A.data, A.indices, A.indptr)[:3]
+    return SparseCSRTensor((M_data, M_indices, M_indptr), A.shape)
 
 
-def splu_solve(LU, b):
-    y = LU.solve_triangular(upper=False, unit=True, b=b)
-    return LU.solve_triangular(upper=True, unit=False, b=y)
+class spsolve_fn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr, b):
+        M_data, M_indices, M_indptr, Mt_data, Mt_indices, Mt_indptr = \
+            numml_torch_cpp.splu(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
 
+        y = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, True, True, b)
+        x = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, False, False, y)
 
-def spsolve(A, b):
-    '''
-    Solves a sparse system of linear equations for a vector right-hand-side.
+        ctx.shape = A_shape
+        ctx.save_for_backward(A_data, A_indices, A_indptr, Mt_data, Mt_indices, Mt_indptr, x)
 
-    Parameters
-    ----------
-    A : SparseCSRTensor
-      Sparse, square tensor encoding some system of equations.
-    b : torch.Tensor
-      Dense right-hand-side vector.
+        return x
 
-    Returns
-    -------
-    x : torch.Tensor
-      The solution to A^{-1} b
-    '''
+    @staticmethod
+    def backward(ctx, grad_x):
+        A_data, A_indices, A_indptr, Mt_data, Mt_indices, Mt_indptr, x = ctx.saved_tensors
+        shape = ctx.shape
 
-    LU = splu(A)
-    return splu_solve(LU, b)
+        grad_A_data, grad_b = numml_torch_cpp.spsolve_backward(grad_x, x, shape[0], shape[1],
+                                                               Mt_data, Mt_indices, Mt_indptr,
+                                                               A_data, A_indices, A_indptr)
+
+        return (None, # A_shape
+                grad_A_data, # A_data
+                None, # A_indices
+                None, # A_indptr
+                grad_b) # b
+spsolve = spsolve_fn.apply
 
 
 class sptranspose(torch.autograd.Function):

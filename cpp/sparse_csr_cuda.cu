@@ -1839,3 +1839,27 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     auto AsT = csr_transpose_forward_cuda(A_cols, A_rows, As_col_data, As_col_indices, As_col_indptr);
     return {AsT[0], AsT[1], AsT[2], As_col_data, As_col_indices, As_col_indptr};
 }
+
+FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
+               spsolve_backward,
+               torch::Tensor grad_x, torch::Tensor x,
+               int A_rows, int A_cols,
+               torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+
+    /* grad_b = A^{-T} grad_x */
+    torch::Tensor grad_b_y = sptrsv_forward_cuda(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, true, false, grad_x);
+    torch::Tensor grad_b = sptrsv_forward_cuda(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, false, true, grad_b_y);
+
+    /* grad_A = (-grad_b x^T) (*) mask(A) */
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_backward_cuda", ([&] {
+        cuda_kernel_masked_outerproduct<scalar_t><<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+            A_rows, A_cols, -1., tensor_acc(grad_b, scalar_t), tensor_acc(x, scalar_t),
+            tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t), tensor_acc(grad_A_data, scalar_t));
+    }));
+
+    return {grad_A_data, grad_b};
+}

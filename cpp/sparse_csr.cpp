@@ -198,6 +198,25 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
     }
 }
 
+FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+                   spsolve_backward,
+                   torch::Tensor grad_x, torch::Tensor x,
+                   int A_rows, int A_cols,
+                   torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    if (is_cuda(A_data)) {
+        return spsolve_backward_cuda(grad_x, x, A_rows, A_cols,
+                                     Mt_data, Mt_indices, Mt_indptr,
+                                     A_data, A_indices, A_indptr);
+    } else {
+        return spsolve_backward_cpu(grad_x, x, A_rows, A_cols,
+                                    Mt_data, Mt_indices, Mt_indptr,
+                                    A_data, A_indices, A_indptr);
+    }
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
     m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
@@ -218,4 +237,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("sptrsv_backward", &sptrsv_backward, "Sparse triangular solve backward");
 
     m.def("splu", &splu, "Sparse LU decomposition");
+    m.def("spsolve_backward", &spsolve_backward, "Sparse LU solve backward");
 }

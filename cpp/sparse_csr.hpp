@@ -110,4 +110,11 @@ FUNC_DEF(std::vector<torch::Tensor>,
          int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
 
+FUNC_DEF(std::vector<torch::Tensor>,
+         spsolve_backward,
+         torch::Tensor grad_x, torch::Tensor x,
+         int A_rows, int A_cols,
+         torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
 #endif
