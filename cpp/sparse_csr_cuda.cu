@@ -1500,9 +1500,10 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indptr,
     bool* __restrict__ vert_visited,
     int64_t* __restrict__ vert_stack,
-    int64_t* __restrict__ As_nnz) {
+    int64_t* __restrict__ As_nnz,
+    int64_t* __restrict__ U_col_nnz) {
 
-    const int64_t thread_idx = threadIdx.x;
+    const int64_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t col = thread_idx;
     int64_t vert_stack_size;
 
@@ -1541,14 +1542,19 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
 
         /* Count number of nonzeros in L and U in the current column */
         int64_t As_nnz_col = 0;
+        int64_t U_nnz_col = 0;
         for (int64_t row = 0; row < A_rows; row++) {
             if (vert_visited[thread_idx * A_cols + row]) {
                 As_nnz_col++;
+                if (row <= col) {
+                    U_nnz_col++;
+                }
             }
         }
         As_nnz[col] = As_nnz_col;
+        U_col_nnz[col] = U_nnz_col;
 
-        col += blockDim.x;
+        col += blockDim.x * gridDim.x;
     }
 }
 
@@ -1572,7 +1578,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
     torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> As_col_indices,
     const int64_t* __restrict__ As_col_indptr) {
 
-    const int64_t thread_idx = threadIdx.x;
+    const int64_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t col = thread_idx;
     int64_t vert_stack_size;
 
@@ -1659,7 +1665,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
             }
         }
 
-        col += blockDim.x;
+        col += blockDim.x * gridDim.x;
     }
 }
 
@@ -1676,6 +1682,86 @@ void cub_cumsum(T* d_ary_in, T* d_ary_out, int64_t n, at::cuda::CUDAStream strea
     cudaFreeAsync(d_temp, stream);
 }
 
+/**
+ * Performs a binary search on an array between i_start and i_end (inclusive).
+ */
+__device__ int64_t kernel_indices_binsearch(int64_t i_start, int64_t i_end, const int64_t i_search,
+                                            const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> indices) {
+    int64_t i_mid;
+    while (i_start <= i_end) {
+        i_mid = (i_start + i_end) / 2;
+        if (indices[i_mid] < i_search) {
+            i_start = i_mid + 1;
+        } else if (indices[i_mid] > i_search) {
+            i_end = i_mid - 1;
+        } else if (indices[i_mid] == i_search) {
+            return i_mid;
+        }
+    }
+    return -1;
+}
+
+/**
+ * The sparse numeric LU factorization from SFLU:
+ * "SFLU: Synchronization-Free Sparse LU Factorization for Fast Circuit Simulation on GPUs", J. Zhao, Y. Luo, Z. Jin, Z. Zhou.
+ *
+ * Indexed on columns of As, where As is given in CSC format and has fill-ins represented by explicit zeros.
+ */
+template <typename scalar_t>
+__global__ void cuda_kernel_splu_numeric_sflu(
+        const int64_t A_rows, const int64_t A_cols,
+        torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> As_col_data,
+        const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> As_col_indices,
+        const int64_t* __restrict__ As_col_indptr,
+        volatile int64_t* __restrict__ degree) {
+
+    const int64_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k > A_cols) {
+        return;
+    }
+
+    int64_t diag_idx;
+    const int64_t col_end = As_col_indptr[k + 1];
+    for (int64_t i_i = As_col_indptr[k]; i_i < col_end; i_i++) {
+        const int64_t i = As_col_indices[i_i];
+        if (i == k) {
+            /* Stop once we get to the diagonal. */
+            diag_idx = i_i;
+            break;
+        }
+
+        /* Busy wait until intermediate results are ready */
+        while (degree[i] > 0);
+
+        /* Left-looking product */
+        for (int64_t j_i = i_i + 1; j_i < col_end; j_i++) {
+            const int64_t j = As_col_indices[j_i];
+            const scalar_t A_ji = As_col_data[kernel_indices_binsearch(As_col_indptr[i], As_col_indptr[i + 1] - 1, j, As_col_indices)];
+            const scalar_t A_ik = As_col_data[i_i];
+
+            /* A_{jk} \gets A_{jk} - A_{ji} A_{ik} */
+            As_col_data[j_i] -= A_ji * A_ik;
+        }
+
+        __threadfence();
+        degree[k]--;
+    }
+
+    /* Divide column of L by diagonal entry of U */
+    const scalar_t A_kk = As_col_data[diag_idx];
+    for (int64_t i = diag_idx + 1; i < As_col_indptr[k + 1]; i++) {
+        As_col_data[i] /= A_kk;
+    }
+
+    /* Complete the factorization and update column degree */
+    __threadfence();
+    degree[k]--;
+}
+
+/**
+ * Sparse LU Factorization, using a left-looking algorithm on the columns of A.  Based on
+ * the symbolic factorization in GSoFa and numeric factorization in SFLU.
+ */
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                splu,
                int A_rows, int A_cols,
@@ -1691,7 +1777,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
 
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
-    /* First, symbolic factorization to determine the sparsity pattern of the filled-in LU factorization
+    /* First, perform the symbolic factorization to determine the sparsity pattern of the filled-in LU factorization
        of A, which we will hereby denote by As.  Note that mask(As) \superset mask(A). */
     const int64_t num_threads_symb = 256;
     const int64_t num_blocks_symb = 1;
@@ -1700,11 +1786,13 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     int64_t* vert_stack;
     int64_t* As_col_nnz;
     int64_t* As_col_indptr_raw;
+    int64_t* U_col_nnz; /* The "degree" array in SFLU.  Defined as nnz(U) for each column. */
 
-    cudaMalloc(&vert_visited, sizeof(bool) * total_threads_symb * A_rows);
-    cudaMalloc(&vert_stack, sizeof(int64_t) * total_threads_symb * A_cols);
-    cudaMalloc(&As_col_nnz, sizeof(int64_t) * A_cols);
-    cudaMalloc(&As_col_indptr_raw, sizeof(int64_t) * (A_cols + 1));
+    cudaMallocAsync(&vert_visited, sizeof(bool) * total_threads_symb * A_rows, main_stream);
+    cudaMallocAsync(&vert_stack, sizeof(int64_t) * total_threads_symb * A_cols, main_stream);
+    cudaMallocAsync(&As_col_nnz, sizeof(int64_t) * A_cols, main_stream);
+    cudaMallocAsync(&As_col_indptr_raw, sizeof(int64_t) * (A_cols + 1), main_stream);
+    cudaMallocAsync(&U_col_nnz, sizeof(int64_t) * A_cols, main_stream);
 
     /* Compute the transpose/csc representation of A so that we have easy column access. */
     auto At = csr_transpose_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
@@ -1715,7 +1803,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     /* First, find number of nonzeros in the columns of A (with fill) */
     cuda_kernel_splu_symbolic_fact_trav_nnz<<<num_blocks_symb, num_threads_symb, 0, main_stream>>>(
         A_rows, A_cols, tensor_acc(At_indices, int64_t), tensor_acc(At_indptr, int64_t),
-        vert_visited, vert_stack, As_col_nnz);
+        vert_visited, vert_stack, As_col_nnz, U_col_nnz);
 
     /* From the column nnz, compute column pointers */
     cudaMemsetAsync(As_col_indptr_raw, 0, sizeof(int64_t), main_stream);
@@ -1739,9 +1827,15 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     cudaFreeAsync(vert_stack, main_stream);
     cudaFreeAsync(vert_visited, main_stream);
 
-    std::cerr << As_col_indptr << std::endl;
-    std::cerr << As_col_indices << std::endl;
-    std::cerr << As_col_data << std::endl;
+    /* Perform the numeric factorization */
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splu_cuda", ([&] {
+        cuda_kernel_splu_numeric_sflu<<<(A_cols + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+            A_rows, A_cols,
+            tensor_acc(As_col_data, scalar_t), tensor_acc(As_col_indices, int64_t), As_col_indptr_raw, U_col_nnz);
+    }));
+    cudaFreeAsync(U_col_nnz, main_stream);
 
-    return {};
+    /* Transpose back into CSR format */
+    auto AsT = csr_transpose_forward_cuda(A_cols, A_rows, As_col_data, As_col_indices, As_col_indptr);
+    return {AsT[0], AsT[1], AsT[2], As_col_data, As_col_indices, As_col_indptr};
 }
