@@ -10,6 +10,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAStream.h>
+#include <cub/cub.cuh>
 
 #include <cuco/static_map.cuh>
 #include <cuco/detail/hash_functions.cuh>
@@ -1476,11 +1477,271 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
 
     /* Compute grad_A = -grad_b x^T (*) mask(A) */
     torch::Tensor grad_A_data = torch::empty_like(A_data);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_backward_gpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_backward_cuda", ([&] {
         cuda_kernel_masked_outerproduct<scalar_t><<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             A_rows, A_cols, -1., tensor_acc(grad_b, scalar_t), tensor_acc(x, scalar_t),
             tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t), tensor_acc(grad_A_data, scalar_t));
     }));
 
     return {grad_A_data, grad_b};
+}
+
+/**
+ * Compute the number of nonzero entries in each column of the LU factorization.
+ * Finds fill-in using a depth-first traversal of the matrix.  Based on
+ * "GSoFa: Scalable Sparse Symbolic LU Factorization on GPUs",  Gaihre A, Li X, Liu H.
+ *
+ * This should be run with one block of some predetermined fixed size.  This is
+ * run with less threads than overall columns due to memory constraints.
+ */
+__global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
+    const int64_t A_rows, const int64_t A_cols,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indptr,
+    bool* __restrict__ vert_visited,
+    int64_t* __restrict__ vert_stack,
+    int64_t* __restrict__ As_nnz) {
+
+    const int64_t thread_idx = threadIdx.x;
+    int64_t col = thread_idx;
+    int64_t vert_stack_size;
+
+    /* We'll round robin over the columns to save memory */
+    while (col < A_cols) {
+
+        /* Zero out bitmap of visited nodes */
+        for (int64_t i = 0; i < A_rows; i++) {
+            vert_visited[thread_idx * A_rows + i] = false;
+        }
+
+        /* Perform a DFS starting from the current column */
+        vert_stack[thread_idx * A_cols] = col;
+        vert_stack_size = 1;
+
+        __syncthreads();
+
+        while (vert_stack_size > 0) {
+            /* pop last item from stack */
+            const int64_t current_column = vert_stack[thread_idx * A_cols + vert_stack_size - 1];
+            --vert_stack_size;
+
+            /* From current column, update stack and visited nodes */
+            for (int64_t i = At_indptr[current_column]; i < At_indptr[current_column + 1]; i++) {
+                const int64_t row = At_indices[i];
+
+                if (row < col && !vert_visited[thread_idx * A_rows + row]) {
+                    vert_stack[thread_idx * A_cols + vert_stack_size] = row;
+                    vert_stack_size++;
+                }
+                vert_visited[thread_idx * A_rows + row] = true;
+            }
+        }
+
+        __syncthreads();
+
+        /* Count number of nonzeros in L and U in the current column */
+        int64_t As_nnz_col = 0;
+        for (int64_t row = 0; row < A_rows; row++) {
+            if (vert_visited[thread_idx * A_cols + row]) {
+                As_nnz_col++;
+            }
+        }
+        As_nnz[col] = As_nnz_col;
+
+        col += blockDim.x;
+    }
+}
+
+/**
+ * Given number of nonzero fill-ins in the column LU factorization, populate
+ * row indices and data entries of the symbolic factorization.  Based on
+ * "GSoFa: Scalable Sparse Symbolic LU Factorization on GPUs",  Gaihre A, Li X, Liu H.
+ *
+ * This should be run with one block of some predetermined fixed size.  This is
+ * run with less threads than overall columns due to memory constraints.
+ */
+template <typename scalar_t>
+__global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
+    const int64_t A_rows, const int64_t A_cols,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> At_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indptr,
+    bool* __restrict__ vert_visited,
+    int64_t* __restrict__ vert_stack,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> As_col_data,
+    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> As_col_indices,
+    const int64_t* __restrict__ As_col_indptr) {
+
+    const int64_t thread_idx = threadIdx.x;
+    int64_t col = thread_idx;
+    int64_t vert_stack_size;
+
+    /* We'll round robin over the columns to save memory */
+    while (col < A_cols) {
+
+        /* Zero out bitmap of visited nodes */
+        for (int64_t i = 0; i < A_rows; i++) {
+            vert_visited[thread_idx * A_rows + i] = false;
+        }
+
+        /* Perform a DFS starting from the current column */
+        vert_stack[thread_idx * A_cols] = col;
+        vert_stack_size = 1;
+
+        __syncthreads();
+
+        while (vert_stack_size > 0) {
+            /* pop last item from stack */
+            const int64_t current_column = vert_stack[thread_idx * A_cols + vert_stack_size - 1];
+            --vert_stack_size;
+
+            /* From current column, update stack and visited nodes */
+            for (int64_t i = At_indptr[current_column]; i < At_indptr[current_column + 1]; i++) {
+                const int64_t row = At_indices[i];
+
+                if (row < col && !vert_visited[thread_idx * A_rows + row]) {
+                    vert_stack[thread_idx * A_cols + vert_stack_size] = row;
+                    vert_stack_size++;
+                }
+                vert_visited[thread_idx * A_rows + row] = true;
+            }
+        }
+
+        __syncthreads();
+
+        /* Insert row indices and nonzero values of At_data.
+           This is essentially a union of the two columns, where entries in As *only* are explicitly zero. */
+
+        int64_t As_ptr = 0; /* Current entry in vert_visited array */
+        int64_t A_ptr = At_indptr[col]; /* Current index in original A */
+        int64_t As_out_ptr = As_col_indptr[col]; /* Current index in output As */
+
+        const int64_t As_end = A_rows;
+        const int64_t A_end = At_indptr[col + 1];
+
+        while (As_ptr < As_end && A_ptr < A_end) {
+            /* Make sure we actually are at a nonzero of As */
+            while (!vert_visited[thread_idx * A_rows + As_ptr]) {
+                As_ptr++;
+            }
+
+            const int64_t As_row = As_ptr;
+            const int64_t A_row = At_indices[A_ptr];
+            if (As_row < A_row) {
+                As_col_data[As_out_ptr] = 0.;
+                As_col_indices[As_out_ptr] = As_row;
+
+                As_ptr++;
+                As_out_ptr++;
+            } else if (As_row > A_row) {
+                /* This is probably unlikely, since A is a subset of As..?
+                   Nonetheless, let's add it here just in case. */
+                As_col_data[As_out_ptr] = At_data[A_ptr];
+                As_col_indices[As_out_ptr] = A_row;
+
+                A_ptr++;
+                As_out_ptr++;
+            } else { /* As_row == A_row */
+                As_col_data[As_out_ptr] = At_data[A_ptr];
+                As_col_indices[As_out_ptr] = A_row;
+
+                A_ptr++;
+                As_ptr++;
+                As_out_ptr++;
+            }
+        }
+        /* Finish off with rest of As entries */
+        for (; As_ptr < As_end; As_ptr++) {
+            if (vert_visited[thread_idx * A_rows + As_ptr]) {
+                As_col_data[As_out_ptr] = 0.;
+                As_col_indices[As_out_ptr] = As_ptr;
+                As_out_ptr++;
+            }
+        }
+
+        col += blockDim.x;
+    }
+}
+
+template <typename T>
+void cub_cumsum(T* d_ary_in, T* d_ary_out, int64_t n, at::cuda::CUDAStream stream) {
+    /* Run first to determine size of auxiliary data buffer */
+    void* d_temp = nullptr;
+    size_t temp_size = 0;
+    cub::DeviceScan::InclusiveSum(d_temp, temp_size, d_ary_in, d_ary_out, n, stream);
+
+    /* Run again to actually compute cumsum */
+    cudaMallocAsync(&d_temp, temp_size, stream);
+    cub::DeviceScan::InclusiveSum(d_temp, temp_size, d_ary_in, d_ary_out, n, stream);
+    cudaFreeAsync(d_temp, stream);
+}
+
+FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
+               splu,
+               int A_rows, int A_cols,
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    auto int_tens_opts = torch::TensorOptions()
+        .dtype(torch::kInt64)
+        .device(A_data.device().type(), A_data.device().index());
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+
+    /* First, symbolic factorization to determine the sparsity pattern of the filled-in LU factorization
+       of A, which we will hereby denote by As.  Note that mask(As) \superset mask(A). */
+    const int64_t num_threads_symb = 256;
+    const int64_t num_blocks_symb = 1;
+    const int64_t total_threads_symb = num_threads_symb * num_blocks_symb;
+    bool* vert_visited;
+    int64_t* vert_stack;
+    int64_t* As_col_nnz;
+    int64_t* As_col_indptr_raw;
+
+    cudaMalloc(&vert_visited, sizeof(bool) * total_threads_symb * A_rows);
+    cudaMalloc(&vert_stack, sizeof(int64_t) * total_threads_symb * A_cols);
+    cudaMalloc(&As_col_nnz, sizeof(int64_t) * A_cols);
+    cudaMalloc(&As_col_indptr_raw, sizeof(int64_t) * (A_cols + 1));
+
+    /* Compute the transpose/csc representation of A so that we have easy column access. */
+    auto At = csr_transpose_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
+    torch::Tensor At_data = At[0];
+    torch::Tensor At_indices = At[1];
+    torch::Tensor At_indptr = At[2];
+
+    /* First, find number of nonzeros in the columns of A (with fill) */
+    cuda_kernel_splu_symbolic_fact_trav_nnz<<<num_blocks_symb, num_threads_symb, 0, main_stream>>>(
+        A_rows, A_cols, tensor_acc(At_indices, int64_t), tensor_acc(At_indptr, int64_t),
+        vert_visited, vert_stack, As_col_nnz);
+
+    /* From the column nnz, compute column pointers */
+    cudaMemsetAsync(As_col_indptr_raw, 0, sizeof(int64_t), main_stream);
+    cub_cumsum(As_col_nnz, As_col_indptr_raw + 1, A_cols, main_stream);
+    main_stream.synchronize();
+    cudaFreeAsync(As_col_nnz, main_stream);
+
+    /* Allocate storage for the data and row indices arrays */
+    int64_t As_nnz;
+    cudaMemcpy(&As_nnz, &(As_col_indptr_raw[A_cols]), sizeof(int64_t), cudaMemcpyDeviceToHost);
+    torch::Tensor As_col_indptr = torch::from_blob(As_col_indptr_raw, { static_cast<int64_t>(A_cols + 1) }, cudaFree, int_tens_opts);
+    torch::Tensor As_col_indices = torch::empty({As_nnz}, int_tens_opts);
+    torch::Tensor As_col_data = torch::empty({As_nnz}, scalar_tens_opts);
+
+    /* Now, fill in As with row indices and entries of A (with explicit zeros where we are anticipating fill) */
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splu_cuda", ([&] {
+        cuda_kernel_splu_symbolic_fact_trav_populate<<<num_blocks_symb, num_threads_symb, 0, main_stream>>>(
+            A_rows, A_cols, tensor_acc(At_data, scalar_t), tensor_acc(At_indices, int64_t), tensor_acc(At_indptr, int64_t),
+            vert_visited, vert_stack, tensor_acc(As_col_data, scalar_t), tensor_acc(As_col_indices, int64_t), As_col_indptr_raw);
+    }));
+    cudaFreeAsync(vert_stack, main_stream);
+    cudaFreeAsync(vert_visited, main_stream);
+
+    std::cerr << As_col_indptr << std::endl;
+    std::cerr << As_col_indices << std::endl;
+    std::cerr << As_col_data << std::endl;
+
+    return {};
 }
