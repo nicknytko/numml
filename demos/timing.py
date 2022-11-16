@@ -22,7 +22,7 @@ def print_bar(thick=False):
 
 def print_header():
     print_bar(True)
-    print(f'|{"Test Name":32}|{"CPU Time (s)":>14}|{"GPU Time (s)":>14}|{"GPU Speedup":>14}|{"Iterations":>14}|{"N":>6}|')
+    print(f'|{"Test Name":32}|{"CPU (ours) (s)":>14}|{"GPU Time (s)":>14}|{"GPU Speedup":>14}|{"Iterations":>14}|{"N":>6}|')
     print_bar(False)
 
 def print_results(test_name, cpu_t, gpu_t, it, N):
@@ -37,6 +37,8 @@ gpu = torch.device('cuda:0')
 tests = {}
 
 ### Timing tests
+
+
 
 def test_spmv():
     N = 32_768
