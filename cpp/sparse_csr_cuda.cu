@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <map>
 #include <tuple>
+#include <cstdio>
 #include <cstdint>
 #include <stdexcept>
 #include <iterator>
@@ -23,6 +24,52 @@ const int threads_per_block = 512;
 
 #define tensor_acc(T, type) (T).packed_accessor64<type, 1, torch::RestrictPtrTraits>()
 #define tensor_acc_3(T, N, type) (T).packed_accessor64<type, N, torch::RestrictPtrTraits>()
+
+/* Helpers */
+
+/** Error handling */
+inline void _cuda_check_err(const cudaError_t err, const char* file, const int line, const char* function) {
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "Error in %s (%s:%n): %s", function, file, line, cudaGetErrorString(err));
+        throw std::runtime_error("CUDA Error.");
+    }
+}
+#define cuda_check_err(err) _cuda_check_err(err, __FILE__, __LINE__, __func__)
+
+/**
+ * Perform a cumulative sum using CUB.
+ */
+template <typename T>
+void cub_cumsum(T* d_ary_in, T* d_ary_out, int64_t n, at::cuda::CUDAStream stream) {
+    /* Run first to determine size of auxiliary data buffer */
+    void* d_temp = NULL;
+    size_t temp_size = 0;
+    cuda_check_err(cub::DeviceScan::InclusiveSum(d_temp, temp_size, d_ary_in, d_ary_out, n, stream));
+
+    /* Run again to actually compute cumsum */
+    cuda_check_err(cudaMallocAsync(&d_temp, temp_size, stream));
+    cuda_check_err(cub::DeviceScan::InclusiveSum(d_temp, temp_size, d_ary_in, d_ary_out, n, stream));
+    cuda_check_err(cudaFreeAsync(d_temp, stream));
+}
+
+/**
+ * Performs a binary search on an array between i_start and i_end (inclusive).
+ */
+__device__ int64_t kernel_indices_binsearch(int64_t i_start, int64_t i_end, const int64_t i_search,
+                                            const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> indices) {
+    int64_t i_mid;
+    while (i_start <= i_end) {
+        i_mid = (i_start + i_end) / 2;
+        if (indices[i_mid] < i_search) {
+            i_start = i_mid + 1;
+        } else if (indices[i_mid] > i_search) {
+            i_end = i_mid - 1;
+        } else if (indices[i_mid] == i_search) {
+            return i_mid;
+        }
+    }
+    return -1;
+}
 
 /* Sparse GEMV */
 
@@ -158,7 +205,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_backward_cuda", ([&] {
         /* We'll create a temporary array to store outputs to and simplify things */
         scalar_t* grad_x_ary = nullptr;
-        cudaMalloc(&grad_x_ary, A_cols * sizeof(scalar_t));
+        cudaMallocAsync(&grad_x_ary, A_cols * sizeof(scalar_t), main_stream);
         cudaMemsetAsync(grad_x_ary, 0, A_cols * sizeof(scalar_t), main_stream);
 
         const int grad_x_threads = A_rows;
@@ -928,19 +975,22 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     torch::Tensor At_indptr;
     torch::Tensor At_indices = torch::empty(nnz, int_tens_opts);
     int64_t* At_indptr_raw;
-    cudaMalloc(&At_indptr_raw, (A_columns + 1) * sizeof(int64_t));
-    cudaMemsetAsync(At_indptr_raw, 0, (A_columns + 1) * sizeof(int64_t), main_stream);
+    int64_t* At_indptr_tmp;
+    cuda_check_err(cudaMallocAsync(&At_indptr_tmp, A_columns * sizeof(int64_t), main_stream));
+    cuda_check_err(cudaMallocAsync(&At_indptr_raw, (A_columns + 1) * sizeof(int64_t), main_stream));
+    cuda_check_err(cudaMemsetAsync(At_indptr_tmp, 0, A_columns * sizeof(int64_t), main_stream));
+    cuda_check_err(cudaMemsetAsync(At_indptr_raw, 0, sizeof(int64_t), main_stream)); /* Zero out first entry. */
 
     /* Compute number of nonzeros per column of A */
     cuda_kernel_csr_nnz_per_col<<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
         A_rows, A_columns,
-        tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t), At_indptr_raw);
-    At_indptr = torch::from_blob(At_indptr_raw, { static_cast<int64_t>(A_columns + 1) }, cudaFree, int_tens_opts);
+        tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t), At_indptr_tmp);
 
     /* Now, compute the cumulative sum of nnz to get starting rowptrs of A^T */
-    torch::Tensor At_indptr_t = At_indptr.index({torch::indexing::Slice(0, -1)}).cumsum(0);
-    At_indptr.index_put_({torch::indexing::Slice(1, torch::indexing::None, torch::indexing::None)}, At_indptr_t);
-    At_indptr[0] = 0;
+    cub_cumsum(At_indptr_tmp, At_indptr_raw + 1, A_columns, main_stream);
+    cuda_check_err(cudaFreeAsync(At_indptr_tmp, main_stream));
+    main_stream.synchronize();
+    At_indptr = torch::from_blob(At_indptr_raw, { static_cast<int64_t>(A_columns + 1) }, cudaFree, int_tens_opts);
 
     /* Move data values into their correct spots */
     torch::Tensor At_to_A_idx = torch::empty(nnz, int_tens_opts);
@@ -1435,11 +1485,11 @@ FUNC_IMPL_CUDA(torch::Tensor,
     /* We allocate these as raw bool and double arrays so that we can mark them as volatile;
        torch doesn't have a native way to do this for tensor accessors */
     bool* value_available;
-    cudaMalloc(&value_available, sizeof(bool) * A_rows);
+    cudaMallocAsync(&value_available, sizeof(bool) * A_rows, main_stream);
     cudaMemsetAsync(value_available, 0, sizeof(bool) * A_rows, main_stream);
 
     double* x_raw;
-    cudaMalloc(&x_raw, sizeof(double) * A_rows);
+    cudaMallocAsync(&x_raw, sizeof(double) * A_rows, main_stream);
 
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_forward_cuda", ([&] {
         if (lower) {
@@ -1498,7 +1548,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
     const int64_t A_rows, const int64_t A_cols,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indices,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indptr,
-    bool* __restrict__ vert_visited,
+    uint8_t* __restrict__ vert_visited,
     int64_t* __restrict__ vert_stack,
     int64_t* __restrict__ As_nnz,
     int64_t* __restrict__ U_col_nnz) {
@@ -1512,7 +1562,10 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
 
         /* Zero out bitmap of visited nodes */
         for (int64_t i = 0; i < A_rows; i++) {
-            vert_visited[thread_idx * A_rows + i] = false;
+            vert_visited[thread_idx * A_rows + i] = 0x0;
+        }
+        for (int64_t i = At_indptr[col]; i < At_indptr[col + 1]; i++) {
+            vert_visited[thread_idx * A_rows + At_indices[i]] = 0x2;
         }
 
         /* Perform a DFS starting from the current column */
@@ -1530,11 +1583,16 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
             for (int64_t i = At_indptr[current_column]; i < At_indptr[current_column + 1]; i++) {
                 const int64_t row = At_indices[i];
 
-                if (row < col && !vert_visited[thread_idx * A_rows + row]) {
+                if (row < current_column && vert_visited[thread_idx * A_rows + row] != 0x1) {
                     vert_stack[thread_idx * A_cols + vert_stack_size] = row;
                     vert_stack_size++;
                 }
-                vert_visited[thread_idx * A_rows + row] = true;
+
+                /* We'll set bit 0 for visited, and bit 1 for fill */
+                vert_visited[thread_idx * A_rows + row] |= 0x1;
+                if (row > current_column) {
+                    vert_visited[thread_idx * A_rows + row] |= 0x2;
+                }
             }
         }
 
@@ -1544,7 +1602,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
         int64_t As_nnz_col = 0;
         int64_t U_nnz_col = 0;
         for (int64_t row = 0; row < A_rows; row++) {
-            if (vert_visited[thread_idx * A_cols + row]) {
+            if (vert_visited[thread_idx * A_cols + row] >= 0x2) {
                 As_nnz_col++;
                 if (row <= col) {
                     U_nnz_col++;
@@ -1572,7 +1630,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
     const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> At_data,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indices,
     const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> At_indptr,
-    bool* __restrict__ vert_visited,
+    uint8_t* __restrict__ vert_visited,
     int64_t* __restrict__ vert_stack,
     torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> As_col_data,
     torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> As_col_indices,
@@ -1587,7 +1645,10 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
 
         /* Zero out bitmap of visited nodes */
         for (int64_t i = 0; i < A_rows; i++) {
-            vert_visited[thread_idx * A_rows + i] = false;
+            vert_visited[thread_idx * A_rows + i] = 0x0;
+        }
+        for (int64_t i = At_indptr[col]; i < At_indptr[col + 1]; i++) {
+            vert_visited[thread_idx * A_rows + At_indices[i]] = 0x2;
         }
 
         /* Perform a DFS starting from the current column */
@@ -1605,11 +1666,16 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
             for (int64_t i = At_indptr[current_column]; i < At_indptr[current_column + 1]; i++) {
                 const int64_t row = At_indices[i];
 
-                if (row < col && !vert_visited[thread_idx * A_rows + row]) {
+                if (row < current_column && vert_visited[thread_idx * A_rows + row] != 0x1) {
                     vert_stack[thread_idx * A_cols + vert_stack_size] = row;
                     vert_stack_size++;
                 }
-                vert_visited[thread_idx * A_rows + row] = true;
+
+                /* We'll set bit 0 for visited, and bit 1 for fill */
+                vert_visited[thread_idx * A_rows + row] |= 0x1;
+                if (row > current_column) {
+                    vert_visited[thread_idx * A_rows + row] |= 0x2;
+                }
             }
         }
 
@@ -1627,7 +1693,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
 
         while (As_ptr < As_end && A_ptr < A_end) {
             /* Make sure we actually are at a nonzero of As */
-            while (!vert_visited[thread_idx * A_rows + As_ptr]) {
+            while (vert_visited[thread_idx * A_rows + As_ptr] < 0x2) {
                 As_ptr++;
             }
 
@@ -1658,7 +1724,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
         }
         /* Finish off with rest of As entries */
         for (; As_ptr < As_end; As_ptr++) {
-            if (vert_visited[thread_idx * A_rows + As_ptr]) {
+            if (vert_visited[thread_idx * A_rows + As_ptr] >= 0x2) {
                 As_col_data[As_out_ptr] = 0.;
                 As_col_indices[As_out_ptr] = As_ptr;
                 As_out_ptr++;
@@ -1667,38 +1733,6 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
 
         col += blockDim.x * gridDim.x;
     }
-}
-
-template <typename T>
-void cub_cumsum(T* d_ary_in, T* d_ary_out, int64_t n, at::cuda::CUDAStream stream) {
-    /* Run first to determine size of auxiliary data buffer */
-    void* d_temp = nullptr;
-    size_t temp_size = 0;
-    cub::DeviceScan::InclusiveSum(d_temp, temp_size, d_ary_in, d_ary_out, n, stream);
-
-    /* Run again to actually compute cumsum */
-    cudaMallocAsync(&d_temp, temp_size, stream);
-    cub::DeviceScan::InclusiveSum(d_temp, temp_size, d_ary_in, d_ary_out, n, stream);
-    cudaFreeAsync(d_temp, stream);
-}
-
-/**
- * Performs a binary search on an array between i_start and i_end (inclusive).
- */
-__device__ int64_t kernel_indices_binsearch(int64_t i_start, int64_t i_end, const int64_t i_search,
-                                            const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> indices) {
-    int64_t i_mid;
-    while (i_start <= i_end) {
-        i_mid = (i_start + i_end) / 2;
-        if (indices[i_mid] < i_search) {
-            i_start = i_mid + 1;
-        } else if (indices[i_mid] > i_search) {
-            i_end = i_mid - 1;
-        } else if (indices[i_mid] == i_search) {
-            return i_mid;
-        }
-    }
-    return -1;
 }
 
 /**
@@ -1716,7 +1750,7 @@ __global__ void cuda_kernel_splu_numeric_sflu(
         volatile int64_t* __restrict__ degree) {
 
     const int64_t k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k > A_cols) {
+    if (k >= A_cols) {
         return;
     }
 
@@ -1782,17 +1816,17 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     const int64_t num_threads_symb = 256;
     const int64_t num_blocks_symb = 1;
     const int64_t total_threads_symb = num_threads_symb * num_blocks_symb;
-    bool* vert_visited;
+    uint8_t* vert_visited;
     int64_t* vert_stack;
     int64_t* As_col_nnz;
     int64_t* As_col_indptr_raw;
     int64_t* U_col_nnz; /* The "degree" array in SFLU.  Defined as nnz(U) for each column. */
 
-    cudaMallocAsync(&vert_visited, sizeof(bool) * total_threads_symb * A_rows, main_stream);
-    cudaMallocAsync(&vert_stack, sizeof(int64_t) * total_threads_symb * A_cols, main_stream);
-    cudaMallocAsync(&As_col_nnz, sizeof(int64_t) * A_cols, main_stream);
-    cudaMallocAsync(&As_col_indptr_raw, sizeof(int64_t) * (A_cols + 1), main_stream);
-    cudaMallocAsync(&U_col_nnz, sizeof(int64_t) * A_cols, main_stream);
+    cuda_check_err(cudaMallocAsync(&vert_visited, sizeof(uint8_t) * total_threads_symb * A_rows, main_stream));
+    cuda_check_err(cudaMallocAsync(&vert_stack, sizeof(int64_t) * total_threads_symb * A_cols, main_stream));
+    cuda_check_err(cudaMallocAsync(&As_col_nnz, sizeof(int64_t) * A_cols, main_stream));
+    cuda_check_err(cudaMallocAsync(&As_col_indptr_raw, sizeof(int64_t) * (A_cols + 1), main_stream));
+    cuda_check_err(cudaMallocAsync(&U_col_nnz, sizeof(int64_t) * A_cols, main_stream));
 
     /* Compute the transpose/csc representation of A so that we have easy column access. */
     auto At = csr_transpose_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
@@ -1806,10 +1840,10 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
         vert_visited, vert_stack, As_col_nnz, U_col_nnz);
 
     /* From the column nnz, compute column pointers */
-    cudaMemsetAsync(As_col_indptr_raw, 0, sizeof(int64_t), main_stream);
+    cuda_check_err(cudaMemsetAsync(As_col_indptr_raw, 0, sizeof(int64_t), main_stream));
     cub_cumsum(As_col_nnz, As_col_indptr_raw + 1, A_cols, main_stream);
     main_stream.synchronize();
-    cudaFreeAsync(As_col_nnz, main_stream);
+    cuda_check_err(cudaFreeAsync(As_col_nnz, main_stream));
 
     /* Allocate storage for the data and row indices arrays */
     int64_t As_nnz;
@@ -1824,16 +1858,21 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             A_rows, A_cols, tensor_acc(At_data, scalar_t), tensor_acc(At_indices, int64_t), tensor_acc(At_indptr, int64_t),
             vert_visited, vert_stack, tensor_acc(As_col_data, scalar_t), tensor_acc(As_col_indices, int64_t), As_col_indptr_raw);
     }));
-    cudaFreeAsync(vert_stack, main_stream);
-    cudaFreeAsync(vert_visited, main_stream);
+    cuda_check_err(cudaFreeAsync(vert_stack, main_stream));
+    cuda_check_err(cudaFreeAsync(vert_visited, main_stream));
 
     /* Perform the numeric factorization */
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splu_cuda", ([&] {
-        cuda_kernel_splu_numeric_sflu<<<(A_cols + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            A_rows, A_cols,
-            tensor_acc(As_col_data, scalar_t), tensor_acc(As_col_indices, int64_t), As_col_indptr_raw, U_col_nnz);
-    }));
-    cudaFreeAsync(U_col_nnz, main_stream);
+    // AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splu_cuda", ([&] {
+    //     cuda_kernel_splu_numeric_sflu<<<(A_cols + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+    //         A_rows, A_cols,
+    //         tensor_acc(As_col_data, scalar_t), tensor_acc(As_col_indices, int64_t), As_col_indptr_raw, U_col_nnz);
+    // }));
+    // cuda_check_err(cudaFreeAsync(U_col_nnz, main_stream));
+
+    // main_stream.synchronize();
+    // std::cerr << As_col_data << std::endl;
+    // std::cerr << As_col_indices << std::endl;
+    // std::cerr << As_col_indptr << std::endl;
 
     /* Transpose back into CSR format */
     auto AsT = csr_transpose_forward_cuda(A_cols, A_rows, As_col_data, As_col_indices, As_col_indptr);

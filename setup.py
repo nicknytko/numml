@@ -23,7 +23,7 @@ if 'CUDA_HOME' in os.environ or 'CUDA_PATH' in os.environ:
                                    os.path.join(os.getcwd(), 'ext/cuCollections/include')
                                ],
                                extra_compile_args={
-                                   'nvcc': ['-std=c++17'],
+                                   'nvcc': ['-std=c++17', '-G'],
                                    'cxx': ['-DCUDA_ENABLED=1', '-O2', '-std=c++17', '-w'],
                                })
 

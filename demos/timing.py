@@ -1,4 +1,5 @@
 import torch
+import torch.linalg as tla
 import numml.sparse as sp
 import time
 import sys
@@ -245,7 +246,7 @@ def test_dlu():
 tests['dlu'] = test_dlu
 
 def test_sptrisolve():
-    N = 512
+    N = 32_768
     A = sp.eye(N) * 2 - sp.eye(N, k=-1)
     A_c = A.to(gpu)
     x = torch.ones(N)
@@ -266,25 +267,49 @@ def test_sptrisolve():
 tests['sptrisolve'] = test_sptrisolve
 
 def test_dtrisolve():
-    N = 512
+    N = 32_768
     A = (sp.eye(N) * 2 - sp.eye(N, k=-1)).to_dense()
     A_c = A.to(gpu)
-    x = torch.ones(N)
+    x = torch.ones(N).reshape((-1, 1))
     x_c = x.to(gpu)
 
     it = 20
-    fwd_cpu_t = time_op(lambda: torch.solve_triangular(x, A, upper=False, unitriangular=False), it)
-    fwd_gpu_t = time_op(lambda: torch.solve_triangular(x_c, A_c, upper=False, unitriangular=False), it)
+    fwd_cpu_t = time_op(lambda: tla.solve_triangular(A, x, upper=False, unitriangular=False), it)
+    fwd_gpu_t = time_op(lambda: tla.solve_triangular(A_c, x_c, upper=False, unitriangular=False), it)
     print_results('D Tri-Solve Forward', fwd_cpu_t, fwd_gpu_t, it, N)
 
     A.requires_grad = True
     A_c.requires_grad = True
 
     it = 10
-    bwd_cpu_t = time_op(lambda: torch.solve_triangular(x, A, upper=False, unitriangular=False).sum().backward(), it)
-    bwd_gpu_t = time_op(lambda: torch.solve_triangular(x_c, A_c, upper=False, unitriangular=False).sum().backward(), it)
+    bwd_cpu_t = time_op(lambda: tla.solve_triangular(A, x, upper=False, unitriangular=False).sum().backward(), it)
+    bwd_gpu_t = time_op(lambda: tla.solve_triangular(A_c, x_c, upper=False, unitriangular=False).sum().backward(), it)
     print_results('D Tri-Solve Backward', bwd_cpu_t, bwd_gpu_t, it, N)
 tests['dtrisolve'] = test_dtrisolve
+
+def test_spsolve():
+    N = 64
+    A = sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
+    A_c = A.to(gpu)
+    x = torch.ones(N)
+    x_c = x.to(gpu)
+
+    it = 1
+    #fwd_cpu_t = time_op(lambda: sp.spsolve(A, x), it)
+    fwd_cpu_t = 0.
+    fwd_gpu_t = time_op(lambda: sp.spsolve(A_c, x_c), it)
+    print_results('SP Direct Solve Forward', fwd_cpu_t, fwd_gpu_t, it, N)
+
+    A.requires_grad = True
+    A_c.requires_grad = True
+
+    it = 1
+    #bwd_cpu_t = time_op(lambda: sp.spsolve(A, x).sum().backward(), it)
+    bwd_cpu_t = 0.
+    bwd_gpu_t = time_op(lambda: sp.spsolve(A_c, x_c).sum().backward(), it)
+    print_results('SP Direct Solve Backward', bwd_cpu_t, bwd_gpu_t, it, N)
+tests['spsolve'] = test_spsolve
+
 
 ### Arg checks
 

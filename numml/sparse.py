@@ -405,7 +405,10 @@ class spsolve_fn(torch.autograd.Function):
                 None, # A_indices
                 None, # A_indptr
                 grad_b) # b
-spsolve = spsolve_fn.apply
+
+
+def spsolve(A, b):
+    return spsolve_fn.apply(A.shape, A.data, A.indices, A.indptr, b)
 
 
 class sptranspose(torch.autograd.Function):
