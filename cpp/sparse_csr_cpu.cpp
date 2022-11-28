@@ -76,19 +76,35 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
 /* Sparse GEMM */
 
+/**
+ * Sparse CSR matrix-matrix multiply following the split
+ * symbolic-numeric factorization outlined in SMMP:
+ * Sparse matrix multiplication package; Bank, Douglas (1993)
+ *
+ * This is more akin to the SciPy implementation, where in the symbolic
+ * section we find cumulative nonzeros in the output (C_indptr), then
+ * in the numeric section we find both sums and column indices.
+ */
 FUNC_IMPL_CPU(std::vector<torch::Tensor>,
               spgemm_forward,
               int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
               int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
-    int C_rows = A_rows;
-    int C_cols = B_cols;
+    const int64_t C_rows = A_rows;
+    const int64_t C_cols = B_cols;
 
-    /* Start with a sparse dict representation of C */
-    std::vector<std::map<int, float>> C_dict;
-    C_dict.resize(C_rows);
-    int64_t C_nnz = 0;
+    const int64_t temp_len = std::max({A_rows, A_cols, B_cols});
+    std::vector<int64_t> temp(temp_len, -1);
 
-    /* Do the matrix product by partial sums over each entry of A and rows of B */
+    auto int_tens_opts = torch::TensorOptions()
+        .dtype(torch::kInt64);
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype());
+
+    torch::Tensor C_data;
+    torch::Tensor C_indices;
+    torch::Tensor C_indptr;
+
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_forward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
@@ -98,44 +114,78 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
         const auto B_indices_acc = B_indices.accessor<int64_t, 1>();
         const auto B_indptr_acc = B_indptr.accessor<int64_t, 1>();
 
-        for (int64_t A_row = 0; A_row < A_rows; A_row++) {
-            for (int64_t A_i = A_indptr_acc[A_row]; A_i < A_indptr_acc[A_row + 1]; A_i++) {
-                const int64_t A_col = A_indices_acc[A_i];
+        C_indptr = torch::empty({C_rows + 1}, int_tens_opts);
+        auto C_indptr_acc = C_indptr.accessor<int64_t, 1>();
 
-                for (int64_t B_i = B_indptr_acc[A_col]; B_i < B_indptr_acc[A_col + 1]; B_i++) {
-                    const int64_t B_col = B_indices_acc[B_i];
+        /** Symbolic factorization */
+        C_indptr_acc[0] = 0;
+        for (int64_t i = 0; i < A_rows; i++) {
+            int64_t length = 0;
 
-                    const int64_t i = A_row;
-                    const int64_t j = B_col;
+            for (int64_t jj = A_indptr_acc[i]; jj < A_indptr_acc[i + 1]; jj++) {
+                const int64_t j = A_indices_acc[jj];
 
-                    if (C_dict[i].find(j) == C_dict[i].end()) {
-                        /* Create the entry if it doesn't exist */
-                        C_dict[i][j] = 0.f;
-                        C_nnz ++;
+                for (int64_t kk = B_indptr_acc[j]; kk < B_indptr_acc[j + 1]; kk++) {
+                    const int64_t k = B_indices_acc[kk];
+
+                    if (temp[k] != i) {
+                        temp[k] = i;
+                        length++;
                     }
-
-                    C_dict[i][j] = C_dict[i][j] + A_data_acc[A_i] * B_data_acc[B_i];
                 }
+            }
+
+            C_indptr_acc[i+1] = C_indptr_acc[i] + length;
+        }
+
+        /** Numeric factorization */
+        const int64_t C_nnz = C_indptr_acc[C_rows];
+        C_data = torch::zeros({C_nnz}, scalar_tens_opts);
+        C_indices = torch::zeros({C_nnz}, int_tens_opts);
+
+        auto C_data_acc = C_data.accessor<scalar_t, 1>();
+        auto C_indices_acc = C_indices.accessor<int64_t, 1>();
+
+        /* Temp storage */
+        std::vector<scalar_t> temp_scalar(temp_len, 0.);
+        std::fill(temp.begin(), temp.end(), -1);
+
+        for (int64_t i = 0; i < A_rows; i++) {
+            int64_t i_start = -2;
+            int64_t length = 0;
+
+            for (int64_t jj = A_indptr_acc[i]; jj < A_indptr_acc[i + 1]; jj++) {
+                const int64_t j = A_indices_acc[jj];
+                const scalar_t ajj = A_data_acc[jj];
+
+                for (int64_t kk = B_indptr_acc[j]; kk < B_indptr_acc[j + 1]; kk++) {
+                    const int64_t k = B_indices_acc[kk];
+                    temp_scalar[k] += ajj * B_data_acc[kk];
+
+                    if (temp[k] == -1) {
+                        temp[k] = i_start;
+                        i_start = k;
+                        length++;
+                    }
+                }
+            }
+
+            for (int64_t jj = C_indptr_acc[i]; jj < C_indptr_acc[i + 1]; jj++) {
+                if (temp_scalar[i_start] != 0) {
+                    /* We have a nonzero sum for this entry. */
+                    C_indices_acc[jj] = i_start;
+                    C_data_acc[jj] = temp_scalar[i_start];
+                }
+
+                /* Update the column start pointer and clear the old entry */
+                const int64_t old_start = i_start;
+                i_start = temp[i_start];
+
+                temp[old_start] = -1;
+                temp_scalar[old_start] = 0.;
             }
         }
     }));
-
-    /* Convert to CSR representation */
-    torch::Tensor C_data = torch::empty(C_nnz, A_data.dtype());
-    torch::Tensor C_indices = torch::empty(C_nnz, torch::TensorOptions().dtype(torch::kLong));
-    torch::Tensor C_indptr = torch::empty(C_rows + 1, torch::TensorOptions().dtype(torch::kLong));
-
-    int C_i = 0;
-    for (int C_row = 0; C_row < C_rows; C_row++) {
-        C_indptr[C_row] = C_i;
-
-        for (const auto& colval : C_dict[C_row]) {
-            C_data[C_i] = colval.second;
-            C_indices[C_i] = colval.first;
-            C_i ++;
-        }
-    }
-    C_indptr[C_rows] = C_nnz;
 
     return {C_data, C_indices, C_indptr};
 }
@@ -168,20 +218,12 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
         /** dA = (grad_C * B^T) (*) mask(A) */
 
-        /* First build a map from i,j coordinates to indices in the data */
-        std::map<std::tuple<int64_t, int64_t>, scalar_t> A_mask;
         for (int64_t A_row = 0; A_row < A_rows; A_row++) {
             for (int64_t A_i = A_indptr_acc[A_row]; A_i < A_indptr_acc[A_row + 1]; A_i++) {
-                A_mask[std::make_tuple(A_row, A_indices_acc[A_i])] = A_i;
-            }
-        }
-
-        /* Now, compute grad_C * B^T */
-        for (int64_t C_row = 0; C_row < C_rows; C_row++) {
-            for (int64_t B_row = 0; B_row < B_rows; B_row++) {
-                if (A_mask.find(std::make_tuple(C_row, B_row)) == A_mask.end()) {
-                    continue; /* This entry doesn't exist in the map, skip */
-                }
+                /* Index on nonzeros of A */
+                const int64_t A_col = A_indices_acc[A_i];
+                const int64_t C_row = A_row;
+                const int64_t B_row = A_col;
 
                 int64_t C_row_i = C_indptr_acc[C_row];
                 int64_t B_row_i = B_indptr_acc[B_row];
@@ -206,7 +248,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
                     }
                 }
 
-                grad_A_data_acc[A_mask[std::make_tuple(C_row, B_row)]] = aij;
+                grad_A_data_acc[A_i] = aij;
             }
         }
 
