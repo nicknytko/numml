@@ -51,9 +51,7 @@ def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
         row_ind = row_ind[row_sort]
         col_ind = col_ind[row_sort]
 
-    nnz = torch.zeros(shape[0], dtype=torch.long, device=values.device)
-    for i in range(shape[0]):
-        nnz[i] = (row_ind == i).sum()
+    nnz = torch.bincount(row_ind, minlength=shape[0])
     cumsum = torch.cumsum(nnz, 0)
     cumsum = torch.cat((torch.tensor([0], device=values.device), cumsum))
 

@@ -76,6 +76,33 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
 /* Sparse GEMM */
 
+void smmp_update_ll(std::vector<int64_t>& ll, int64_t& head, const int64_t k) {
+    if (head == -2) {
+        head = k;
+        ll[k] = -2;
+    } else if (k < head) {
+        ll[k] = head;
+        head = k;
+    } else {
+        int64_t cur = ll[head];
+        int64_t prev = head;
+
+        while (cur >= 0) {
+            if (k < cur) {
+                ll[prev] = k;
+                ll[k] = cur;
+                return;
+            }
+
+            prev = cur;
+            cur = ll[cur];
+        }
+        /* Exhausted LL, put at end */
+        ll[prev] = k;
+        ll[k] = -2;
+    }
+}
+
 /**
  * Sparse CSR matrix-matrix multiply following the split
  * symbolic-numeric factorization outlined in SMMP:
@@ -163,19 +190,15 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
                     temp_scalar[k] += ajj * B_data_acc[kk];
 
                     if (temp[k] == -1) {
-                        temp[k] = i_start;
-                        i_start = k;
+                        smmp_update_ll(temp, i_start, k);
                         length++;
                     }
                 }
             }
 
             for (int64_t jj = C_indptr_acc[i]; jj < C_indptr_acc[i + 1]; jj++) {
-                if (temp_scalar[i_start] != 0) {
-                    /* We have a nonzero sum for this entry. */
-                    C_indices_acc[jj] = i_start;
-                    C_data_acc[jj] = temp_scalar[i_start];
-                }
+                C_indices_acc[jj] = i_start;
+                C_data_acc[jj] = temp_scalar[i_start];
 
                 /* Update the column start pointer and clear the old entry */
                 const int64_t old_start = i_start;
