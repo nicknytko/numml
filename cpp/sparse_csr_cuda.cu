@@ -731,31 +731,6 @@ __global__ void cuda_kernel_masked_AT_Chat_expansion(
     }
 }
 
-/**
- * Find the number of nonzero entries per row in a sorted COO format.
- * Indexed on the row output.
- */
-__global__ void cuda_kernel_nnz_per_row_coo(
-    int A_rows,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_I,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_J,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> nnz_per_row) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= A_rows) {
-        return;
-    }
-
-    int64_t nnz = 0;
-    for (int64_t j = 0; j < A_I.size(0); j++) {
-        if (A_I[j] == i) {
-            nnz++;
-        }
-    }
-
-    nnz_per_row[i] = nnz;
-}
-
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                spgemm_backward,
                torch::Tensor grad_C, torch::Tensor C_indices, torch::Tensor C_indptr,
@@ -831,10 +806,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     lexsort_coo_ijv(Bhat_I, Bhat_J, Bhat_V);
 
     /* Find the ~actual~ number of nonzeros for each row of Bhat, now that we have the output */
-    Bhat_nnz.resize_(B_rows);
-    cuda_kernel_nnz_per_row_coo<<<(B_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-        B_rows, tensor_acc(Bhat_I, int64_t), tensor_acc(Bhat_J, int64_t), tensor_acc(Bhat_nnz, int64_t));
-    Bhat_nnz_cumsum = Bhat_nnz.cumsum(0);
+    Bhat_nnz_cumsum = Bhat_I.bincount(c10::nullopt, A_rows).cumsum(0);
 
     /* Now, assemble the matrix */
     const int64_t B_total_nnz = B_indptr[B_indptr.size(0) - 1].item<int64_t>();
