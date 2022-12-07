@@ -1039,9 +1039,9 @@ class LinearOperator(object):
         shape : tuple
           Shape of the underlying operator
         rm : callable
-          Function that takes torch Tensor x and returns Ax
+          Function that takes torch Tensor x and returns A x
         lm : callable
-          Function that takes torch Tensor x and returns xA
+          Function that takes torch Tensor x and returns x^T A
         '''
 
         self.shape = shape

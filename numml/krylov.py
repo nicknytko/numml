@@ -99,6 +99,7 @@ def conjugate_gradient(A, b, x=None, M=None, rtol=1e-6, iterations=None):
       Initial guess to the solution.  If not given, will default to zero.
     M : numml.sparse.SparseCSRTensor or numml.sparse.LinearOperator
       Preconditioner, if it exists.  If not given this will behave like the identity.
+      This should also be SPD.
     rtol : float
       Relative tolerance for stopping condition.  Will terminate the algorithm when
       ||b - Ax|| / ||b|| <= rtol
@@ -122,15 +123,16 @@ def conjugate_gradient(A, b, x=None, M=None, rtol=1e-6, iterations=None):
 
     if M is None:
         # No preconditioner means we use the identity
-        M = sp.LinearOperator(A.shape, lambda x: x.clone(), lambda x: x.clone())
+        M = sp.LinearOperator(A.shape, rm=lambda x: x.clone(), lm=lambda x: x.clone())
 
     z = M @ r
     p = z.clone()
-    nrm_b = tla.norm(b)
+    norm_b = tla.norm(b)
     it = 0
-    res_hist = [tla.norm(r)]
+    norm_r = tla.norm(r)
+    res_hist = [norm_r]
 
-    while tla.norm(r) / nrm_b > rtol:
+    while norm_r / norm_b > rtol:
         Ap = A@p
         rz = r@z
         alpha = rz/(Ap@p)
@@ -140,9 +142,14 @@ def conjugate_gradient(A, b, x=None, M=None, rtol=1e-6, iterations=None):
         beta = (r@z) / rz
         p = z + beta * p
 
-        res_hist.append(tla.norm(r))
+        norm_r = tla.norm(r)
+        if torch.any(torch.isnan(norm_r)):
+            # if we have NaN r norm then we likely aren't converging, return early
+            return x, torch.stack(res_hist)
+
+        res_hist.append(norm_r)
         it += 1
         if iterations is not None and it >= iterations:
             break
 
-    return x, res_hist
+    return x, torch.stack(res_hist)
