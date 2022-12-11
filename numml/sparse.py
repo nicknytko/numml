@@ -1,9 +1,38 @@
 import torch
 import numml_torch_cpp
 import numpy as np
-import scipy.sparse as scisp
 import numml.utils as utils
+import importlib
 
+# Try to import scipy and cupy for conversion routines
+class NotFoundModule:
+    def __init__(self, modname):
+        self.modname = modname
+    def __getattr__(self, key):
+        raise RuntimeError(f'Cannot get field {key}, {self.modname} is not installed or not available for import on this system.')
+
+class LazyImportModule:
+    def __init__(self, modname):
+        self.modname = modname
+        self.module = None
+
+    def __getattr__(self, key):
+        if self.module is None:
+            self.module = importlib.import_module(self.modname)
+        return getattr(self.module, key)
+
+def try_import(modname):
+    try:
+        return importlib.import_module(modname)
+    except ImportError:
+        return NotFoundModule(modname)
+
+def try_import_lazy(modname):
+    return LazyImportModule(modname)
+
+sci_sp = try_import('scipy.sparse')
+cupy = try_import_lazy('cupy')
+cupy_sp = try_import_lazy('cupyx.scipy.sparse')
 
 def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
     '''
@@ -22,9 +51,7 @@ def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
         row_ind = row_ind[row_sort]
         col_ind = col_ind[row_sort]
 
-    nnz = torch.zeros(shape[0], dtype=torch.long, device=values.device)
-    for i in range(shape[0]):
-        nnz[i] = (row_ind == i).sum()
+    nnz = torch.bincount(row_ind, minlength=shape[0])
     cumsum = torch.cumsum(nnz, 0)
     cumsum = torch.cat((torch.tensor([0], device=values.device), cumsum))
 
@@ -508,7 +535,7 @@ class SparseCSRTensor(object):
                 self.shape = shape
             else:
                 self.shape = arg1.shape
-        elif isinstance(arg1, scisp.spmatrix):
+        elif isinstance(arg1, sci_sp.spmatrix):
             arg_csr = arg1.tocsr()
             self.data = torch.Tensor(arg_csr.data.copy())
             self.indices = torch.Tensor(arg_csr.indices.copy()).long()
@@ -656,8 +683,38 @@ class SparseCSRTensor(object):
           SciPy sparse CSR output
         '''
 
-        return scisp.csr_matrix((self.data.cpu().detach().double().numpy(),
-                                 self.indices.cpu().numpy(), self.indptr.cpu().numpy()), self.shape)
+        return sci_sp.csr_matrix((self.data.cpu().detach().double().numpy(),
+                                  self.indices.cpu().numpy(), self.indptr.cpu().numpy()), self.shape)
+
+    def to_cupy_csr(self, device=None):
+        '''
+        Converts the Torch CSR representatino to a CuPy sparse GPU CSR.
+        Gradient information on the data will be lost, if it exists.
+        If this matrix is not on the GPU, then it will be sent to the device
+        that is passed as an argument, otherwise it will assume cuda:0.
+
+        Parameters
+        ----------
+        device : torch.Device, optional
+          CUDA device this should be moved to if it isn't already on the GPU
+
+        Returns
+        -------
+        A_cupy : cupyx.scipy.sparse.csr_matrix
+          Sparse CuPy CSR matrix.
+        '''
+
+        if self.device.type == 'cuda':
+            data_cupy = cupy.asarray(self.data.detach())
+            indices_cupy = cupy.asarray(self.indices.detach())
+            indptr_cupy = cupy.asarray(self.indptr.detach())
+            return cupy_sp.csr_matrix((data_cupy, indices_cupy, indptr_cupy), self.shape)
+        else:
+            gpu = torch.device('cuda:0')
+            data_cupy = cupy.asarray(self.data.detach().to(gpu))
+            indices_cupy = cupy.asarray(self.indices.detach().to(gpu))
+            indptr_cupy = cupy.asarray(self.indptr.detach().to(gpu))
+            return cupy_sp.csr_matrix((data_cupy, indices_cupy, indptr_cupy), self.shape)
 
     def sum(self):
         '''
@@ -904,9 +961,9 @@ class LinearOperator(object):
         shape : tuple
           Shape of the underlying operator
         rm : callable
-          Function that takes torch Tensor x and returns Ax
+          Function that takes torch Tensor x and returns A x
         lm : callable
-          Function that takes torch Tensor x and returns xA
+          Function that takes torch Tensor x and returns x^T A
         '''
 
         self.shape = shape
