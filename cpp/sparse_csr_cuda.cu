@@ -1539,14 +1539,13 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
     const int64_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t row = thread_idx;
 
-    /* Zero out bitmap of visited nodes */
-    for (int64_t i = 0; i < A_cols; i++) {
-        vert_fill[thread_idx * A_cols + i] = 0;
-        vert_mask[thread_idx * A_cols + i] = false;
-    }
-
     /* We'll round robin over the columns to save memory */
     while (row < A_rows) {
+        /* Zero out bitmap of visited nodes */
+        for (int64_t i = 0; i < A_cols; i++) {
+            vert_fill[thread_idx * A_cols + i] = 0;
+            vert_mask[thread_idx * A_cols + i] = false;
+        }
 
         /* Set fill array */
         for (int64_t v_i = A_indptr[row]; v_i < A_indptr[row + 1]; v_i++) {
@@ -1622,14 +1621,13 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
     const int64_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t row = thread_idx;
 
-    /* Zero out bitmap of visited nodes */
-    for (int64_t i = 0; i < A_rows; i++) {
-        vert_fill[thread_idx * A_rows + i] = 0;
-        vert_mask[thread_idx * A_rows + i] = false;
-    }
-
     /* We'll round robin over the columns to save memory */
     while (row < A_rows) {
+        /* Zero out bitmap of visited nodes */
+        for (int64_t i = 0; i < A_rows; i++) {
+            vert_fill[thread_idx * A_rows + i] = 0;
+            vert_mask[thread_idx * A_rows + i] = false;
+        }
 
         /* Set fill array */
         for (int64_t v_i = A_indptr[row]; v_i < A_indptr[row + 1]; v_i++) {
