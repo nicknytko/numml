@@ -832,6 +832,9 @@ class SparseCSRTensor(object):
 
         return SparseCSRTensor((torch.abs(self.data), self.indices, self.indptr), self.shape)
 
+    def __abs__(self):
+        return self.abs()
+
     def _isscalar(x):
         return (isinstance(x, float) or
                 isinstance(x, int) or
