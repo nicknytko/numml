@@ -1783,7 +1783,11 @@ __global__ void cuda_kernel_splu_numeric_sflu(
         /* Left-looking product */
         for (int64_t j_i = i_i + 1; j_i < col_end; j_i++) {
             const int64_t j = As_col_indices[j_i];
-            const scalar_t A_ji = As_col_data[kernel_indices_binsearch(As_col_indptr[i], As_col_indptr[i + 1] - 1, j, As_col_indices)];
+            const int64_t A_ji_i = kernel_indices_binsearch(As_col_indptr[i], As_col_indptr[i + 1] - 1, j, As_col_indices);
+            if (A_ji_i == -1) {
+                continue;
+            }
+            const scalar_t A_ji = As_col_data[A_ji_i];
             const scalar_t A_ik = As_col_data[i_i];
 
             /* A_{jk} \gets A_{jk} - A_{ji} A_{ik} */
@@ -1807,7 +1811,7 @@ __global__ void cuda_kernel_splu_numeric_sflu(
 
 /**
  * Sparse LU Factorization, using a left-looking algorithm on the columns of A.  Based on
- * the symbolic factorization in GSoFa and numeric factorization in SFLU.
+ * the symbolic factorization from Rose, Tarjan's fill2 and numeric factorization in SFLU.
  */
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                splu,
@@ -1843,7 +1847,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     cudaMallocAsync(&As_row_indptr_raw, sizeof(int64_t) * (A_rows + 1), main_stream);
     cudaMallocAsync(&U_col_nnz, sizeof(int64_t) * A_cols, main_stream);
 
-    /* First, find number of nonzeros in the columns of A (with fill) */
+    /* First, find number of nonzeros in the rows of M=(L+U) (with fill) */
     cuda_kernel_splu_symbolic_fact_trav_nnz<<<num_blocks_symb, num_threads_symb, 0, main_stream>>>(
         A_rows, A_cols, tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
         vert_fill, vert_queue, vert_mask, As_row_nnz);

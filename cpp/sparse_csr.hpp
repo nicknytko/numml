@@ -1,5 +1,5 @@
-#ifndef SPARSE_CSR_H_
-#define SPARSE_CSR_H_
+#ifndef SPARSE_CSR_HPP_
+#define SPARSE_CSR_HPP_
 
 #include <torch/extension.h>
 #include <vector>

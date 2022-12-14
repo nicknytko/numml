@@ -194,7 +194,7 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
     if (is_cuda(A_data)) {
         return splu_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
     } else {
-        return {};
+        return splu_cpu(A_rows, A_cols, A_data, A_indices, A_indptr);
     }
 }
 
