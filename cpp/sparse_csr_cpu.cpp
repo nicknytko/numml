@@ -317,7 +317,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     const int64_t nnz = A_indptr[A_rows].item<int64_t>();
 
-    torch::Tensor At_data = torch::empty(nnz);
+    torch::Tensor At_data = torch::empty_like(A_data);
     torch::Tensor At_indptr = torch::zeros(A_columns + 1, torch::TensorOptions().dtype(torch::kLong));
     torch::Tensor At_indices = torch::empty(nnz, torch::TensorOptions().dtype(torch::kLong));
     torch::Tensor At_to_A_idx = torch::empty(nnz, torch::TensorOptions().dtype(torch::kLong));
