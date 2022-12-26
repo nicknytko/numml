@@ -727,7 +727,7 @@ class SparseCSRTensor(object):
           Dense output
         '''
 
-        X = torch.zeros(self.shape, device=self.data.device)
+        X = torch.zeros(self.shape, device=self.data.device, dtype=self.data.dtype)
         for row_i in range(len(self.indptr) - 1):
             for data_j in range(self.indptr[row_i], self.indptr[row_i + 1]):
                 X[row_i, self.indices[data_j]] = self.data[data_j]
