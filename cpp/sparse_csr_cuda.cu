@@ -8,79 +8,10 @@
 #include <tuple>
 #include <iostream>
 
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <c10/cuda/CUDAStream.h>
-#include <cub/cub.cuh>
-
-#include <cuco/static_map.cuh>
-#include <cuco/detail/hash_functions.cuh>
-#include <cuco/allocator.hpp>
-
+#include "cuda_common.cuh"
 #include "sparse_csr.hpp"
 
-const int threads_per_block_2d = 32;
-const int threads_per_block = 512;
-
-#define tensor_acc(T, type) (T).packed_accessor64<type, 1, torch::RestrictPtrTraits>()
-#define tensor_acc_3(T, N, type) (T).packed_accessor64<type, N, torch::RestrictPtrTraits>()
-
-/* Helpers */
-
-/** Error handling */
-inline void _cuda_check_err(const cudaError_t err, const char* file, const int line, const char* function) {
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "Error in %s (%s:%d): %s", function, file, line, cudaGetErrorString(err));
-        throw std::runtime_error("CUDA Error.");
-    }
-}
-#define cuda_check_err(err) _cuda_check_err(err, __FILE__, __LINE__, __func__)
-
-template <typename T>
-inline void cuda_print_1d_array(const T* __restrict__ d_ary, const uint64_t length, at::cuda::CUDAStream stream) {
-    T* h_ary = new T[length];
-    cudaMemcpyAsync(h_ary, d_ary, length * sizeof(T), cudaMemcpyDeviceToHost, stream);
-    stream.synchronize();
-    for (uint64_t i = 0; i < length; i++) {
-        std::cerr << h_ary[i] << " ";
-    }
-    delete[] h_ary;
-}
-
-/**
- * Perform a cumulative sum using CUB.
- */
-template <typename T>
-void cub_cumsum(T* d_ary_in, T* d_ary_out, int64_t n, at::cuda::CUDAStream stream) {
-    /* Run first to determine size of auxiliary data buffer */
-    void* d_temp = NULL;
-    size_t temp_size = 0;
-    cuda_check_err(cub::DeviceScan::InclusiveSum(d_temp, temp_size, d_ary_in, d_ary_out, n, stream));
-
-    /* Run again to actually compute cumsum */
-    cuda_check_err(cudaMalloc(&d_temp, temp_size));
-    cuda_check_err(cub::DeviceScan::InclusiveSum(d_temp, temp_size, d_ary_in, d_ary_out, n, stream));
-    cuda_check_err(cudaFree(d_temp));
-}
-
-/**
- * Performs a binary search on an array between i_start and i_end (inclusive).
- */
-__device__ int64_t kernel_indices_binsearch(int64_t i_start, int64_t i_end, const int64_t i_search,
-                                            const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> indices) {
-    int64_t i_mid;
-    while (i_start <= i_end) {
-        i_mid = (i_start + i_end) / 2;
-        if (indices[i_mid] < i_search) {
-            i_start = i_mid + 1;
-        } else if (indices[i_mid] > i_search) {
-            i_end = i_mid - 1;
-        } else if (indices[i_mid] == i_search) {
-            return i_mid;
-        }
-    }
-    return -1;
-}
+#include <chrono>
 
 /* Sparse GEMV */
 
@@ -132,6 +63,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
             tensor_acc(A_data, scalar_t), tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t),
             tensor_acc(x, scalar_t), tensor_acc(Ax, scalar_t));
     }));
+    cuda_check_kernel_launch_err();
 
     return Ax;
 }
@@ -210,6 +142,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(grad_z, scalar_t), tensor_acc(x, scalar_t),
             tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t), tensor_acc(grad_A, scalar_t));
     }));
+    cuda_check_kernel_launch_err();
 
     /* compute grad_x = A^T grad_z */
     torch::Tensor grad_x;
@@ -226,6 +159,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(grad_z, scalar_t),
             tensor_acc(A_data, scalar_t), tensor_acc(A_col_ind, int64_t), tensor_acc(A_rowptr, int64_t),
             grad_x_ary);
+        cuda_check_kernel_launch_err();
 
         /* Array blob -> torch tensor.  Torch will handle deallocation if we pass it a destructor. */
         const auto scalar_tens_opts = torch::TensorOptions()
@@ -235,649 +169,6 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     }));
 
     return {grad_A, grad_x};
-}
-
-/**
- * Find the number of nonzeros for two sparse CSR matrices.
- * Indexed on rows of A.
- */
-__global__ void cuda_kernel_find_nnz(
-    int A_rows,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_nnz) {
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (i >= A_rows) {
-        return;
-    }
-    A_nnz[i] = A_indptr[i+1] - A_indptr[i];
-}
-
-/**
- * Computes the maximal number of nonzero entries per row in the CSR SPGEMM product.
- * Indexed on rows of C.
- */
-__global__ void cuda_kernel_find_Chat_nnz(
-    int C_rows,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_nnz,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_nnz,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_nnz) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= C_rows) {
-        return;
-    }
-
-    int64_t nnz = 0;
-    int64_t k;
-    for (int64_t k_i = A_indptr[i]; k_i < A_indptr[i + 1]; k_i++) {
-        k = A_indices[k_i];
-        nnz += B_nnz[k];
-    }
-    Chat_nnz[i] = nnz;
-}
-
-
-/**
- * Computes the matrix expansion in the CSR SPGEMM product.
- * Indexed on rows of C.
- */
-template <typename scalar_t>
-__global__ void cuda_kernel_Chat_expansion(
-    int C_rows,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> B_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indptr,
-    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> Chat_data,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_I,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_J) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= C_rows) {
-        return;
-    }
-
-    /* Grab starting index for entries of Chat */
-    int64_t C_row_idx = 0;
-    if (i > 0) {
-        C_row_idx = Chat_indptr[i - 1];
-    }
-
-    /* Multiply row of A and row of B */
-    int64_t k_i, k, j_i, j;
-    for (k_i = A_indptr[i]; k_i < A_indptr[i + 1]; k_i++) {
-        k = A_indices[k_i];
-        for (j_i = B_indptr[k]; j_i < B_indptr[k + 1]; j_i++) {
-            j = B_indices[j_i];
-
-            Chat_I[C_row_idx] = i;
-            Chat_J[C_row_idx] = j;
-            Chat_data[C_row_idx] = A_data[k_i] * B_data[j_i];
-
-            C_row_idx ++;
-        }
-    }
-}
-
-/**
- * Permutes the entries of data such that data_p[i] = data[permutation[i]].
- * Indexed on entries of data.
- */
-template <typename scalar_t>
-__global__ void cuda_kernel_tensor_permute(
-    int length,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> data,
-    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> data_p,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> permutation,
-    const bool permute_input) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= length) {
-        return;
-    }
-
-    if (permute_input) {
-        data_p[i] = data[permutation[i]];
-    } else {
-        data_p[permutation[i]] = data[i];
-    }
-}
-
-/**
- * Compute the number of nonzero entries per row of (sorted) Chat by counting unique column indices.
- * Indexed on rows of C.
- */
-__global__ void cuda_kernel_Chat_to_C_row_nnz(
-    int C_rows,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indices,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_nnz) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= C_rows) {
-        return;
-    }
-
-    const int64_t start_idx = (i > 0 ? Chat_indptr[i-1] : 0);
-    const int64_t end_idx = Chat_indptr[i];
-
-    int64_t cur_col = -1;
-    int64_t nnz = 0;
-    for (int64_t j = start_idx; j < end_idx; j++) {
-        int64_t col = Chat_indices[j];
-        if (col != cur_col) {
-            nnz++;
-        }
-        cur_col = col;
-    }
-    C_nnz[i] = nnz;
-}
-
-/**
- * Assemble data and indices of C from Chat given indptr
- * Indexed on rows of C.
- */
-template <typename scalar_t>
-__global__ void cuda_kernel_assemble_C(
-    int C_rows,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> Chat_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indices,
-    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> C_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indices) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= C_rows) {
-        return;
-    }
-
-    const int64_t start_idx = (i > 0 ? Chat_indptr[i-1] : 0);
-    const int64_t end_idx = Chat_indptr[i];
-    int64_t cur_col = Chat_indices[start_idx];
-    int64_t cur_C_ptr = C_indptr[i];
-    scalar_t acc = 0.;
-
-    for (int64_t j = start_idx; j <= end_idx; j++) {
-        if (j == end_idx || Chat_indices[j] != cur_col) {
-            C_data[cur_C_ptr] = acc;
-            C_indices[cur_C_ptr] = cur_col;
-
-            cur_C_ptr++;
-            acc = 0.;
-
-            if (j == end_idx) {
-                break;
-            } else {
-                cur_col = Chat_indices[j];
-            }
-        }
-        acc += Chat_data[j];
-    }
-}
-
-/**
- * Assemble data and indices of C from Chat given indptr, does not affect the column indices.
- * Indexed on rows of A.
- */
-template <typename scalar_t>
-__global__ void cuda_kernel_assemble_C_data_only(
-    int C_rows,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> Chat_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indices,
-    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> C_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= C_rows) {
-        return;
-    }
-
-    const int64_t start_idx = (i > 0 ? Chat_indptr[i-1] : 0);
-    const int64_t end_idx = Chat_indptr[i];
-    int64_t cur_col = Chat_indices[start_idx];
-    int64_t cur_C_ptr = C_indptr[i];
-    scalar_t acc = 0.;
-
-    for (int64_t j = start_idx; j <= end_idx; j++) {
-        if (j == end_idx || Chat_indices[j] != cur_col) {
-            C_data[cur_C_ptr] = acc;
-
-            cur_C_ptr++;
-            acc = 0.;
-
-            if (j == end_idx) {
-                break;
-            } else {
-                cur_col = Chat_indices[j];
-            }
-        }
-        acc += Chat_data[j];
-    }
-}
-
-/**
- * Given intermediate row, column, value COO representation,
- * sort entries first by row then by column.
- */
-void lexsort_coo_ijv(torch::Tensor& Bhat_I,
-                     torch::Tensor& Bhat_J,
-                     torch::Tensor& Bhat_V) {
-
-    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
-
-    /* Sort first by columns... */
-    torch::Tensor argsort = std::get<1>(Bhat_J.sort(false, -1, false));
-    torch::Tensor i_temp = torch::empty_like(Bhat_I);
-    torch::Tensor j_temp = torch::empty_like(Bhat_J);
-    torch::Tensor v_temp = torch::empty_like(Bhat_V);
-
-    const int64_t Bhat_total_nnz = Bhat_I.size(0);
-
-    /* ...permute entries into their correct positions */
-    AT_DISPATCH_FLOATING_TYPES(Bhat_V.type(), "lexsort_coo_ijv", [&] {
-        cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            Bhat_total_nnz, tensor_acc(Bhat_I, int64_t), tensor_acc(i_temp, int64_t), tensor_acc(argsort, int64_t), true);
-        cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            Bhat_total_nnz, tensor_acc(Bhat_J, int64_t), tensor_acc(j_temp, int64_t), tensor_acc(argsort, int64_t), true);
-        cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            Bhat_total_nnz, tensor_acc(Bhat_V, scalar_t), tensor_acc(v_temp, scalar_t), tensor_acc(argsort, int64_t), true);
-    });
-
-    /* Now, stable sort on rows.
-
-       Rant incoming:
-       Torch's (arg)sort interface is broke on 1.12.1, so we perform this awful incantation.
-       Specifically, we can't even call argsort with stable, so we have to call
-       sort and grab the second argument, making sure to reshape inputs because for some
-       reason it breaks on flat vectors!! */
-    argsort = std::get<1>(i_temp.reshape({1, -1}).sort(true, -1, false)).flatten();
-
-    /* ...and again permute entries into correct spots */
-    AT_DISPATCH_FLOATING_TYPES(Bhat_V.type(), "lexsort_coo_ijv", [&] {
-        cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            Bhat_total_nnz, tensor_acc(i_temp, int64_t), tensor_acc(Bhat_I, int64_t), tensor_acc(argsort, int64_t), true);
-        cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            Bhat_total_nnz, tensor_acc(j_temp, int64_t), tensor_acc(Bhat_J, int64_t), tensor_acc(argsort, int64_t), true);
-        cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            Bhat_total_nnz, tensor_acc(v_temp, scalar_t), tensor_acc(Bhat_V, scalar_t), tensor_acc(argsort, int64_t), true);
-    });
-}
-
-/* Sparse GEMM */
-
-/**
- * CUDA implementation of sparse csr matrix matrix product (forward pass)
- * based on the algorithm sketched here:
- * http://lukeo.cs.illinois.edu/files/2015_BeDaOl_SPMM.pdf
- *
- * I don't claim that this is a super optimized version, but it's much faster than CPU :-)
- */
-
-FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
-               spgemm_forward,
-               int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
-               int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
-    const int C_rows = A_rows;
-    const int C_cols = B_cols;
-
-    auto int_tens_opts = torch::TensorOptions()
-        .dtype(torch::kInt64)
-        .device(A_data.device().type(), A_data.device().index());
-
-    auto scalar_tens_opts = torch::TensorOptions()
-        .dtype(A_data.dtype())
-        .device(A_data.device().type(), A_data.device().index());
-
-    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
-
-    /* Find NNZ in each matrix row */
-    torch::Tensor A_nnz = torch::empty({A_rows}, int_tens_opts);
-    torch::Tensor B_nnz = torch::empty({B_rows}, int_tens_opts);
-    cuda_kernel_find_nnz<<<A_rows + threads_per_block - 1 / threads_per_block, threads_per_block, 0, main_stream>>>(
-        A_rows, tensor_acc(A_indptr, int64_t), tensor_acc(A_nnz, int64_t));
-    cuda_kernel_find_nnz<<<B_rows + threads_per_block - 1 / threads_per_block, threads_per_block, 0, main_stream>>>(
-        B_rows, tensor_acc(B_indptr, int64_t), tensor_acc(B_nnz, int64_t));
-
-    /* Find NNZ in each row of \hat{C} */
-    torch::Tensor Chat_nnz = torch::empty({C_rows}, int_tens_opts);
-    cuda_kernel_find_Chat_nnz<<<(C_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-        C_rows, tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),
-        tensor_acc(A_nnz, int64_t), tensor_acc(B_nnz, int64_t), tensor_acc(Chat_nnz, int64_t));
-
-    torch::Tensor Chat_nnz_cumsum = Chat_nnz.cumsum(0);
-    int64_t Chat_total_nnz = Chat_nnz_cumsum[Chat_nnz_cumsum.size(0) - 1].item<int64_t>();
-
-    /* Compute the entries of Chat via expansion */
-    torch::Tensor Chat_I = torch::empty({Chat_total_nnz}, int_tens_opts);
-    torch::Tensor Chat_J = torch::empty({Chat_total_nnz}, int_tens_opts);
-    torch::Tensor Chat_V = torch::empty({Chat_total_nnz}, scalar_tens_opts);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_forward_cuda", ([&] {
-        cuda_kernel_Chat_expansion<scalar_t><<<(C_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            C_rows,
-            tensor_acc(A_data, scalar_t), tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),
-            tensor_acc(B_data, scalar_t), tensor_acc(B_indptr, int64_t), tensor_acc(B_indices, int64_t),
-            tensor_acc(Chat_nnz_cumsum, int64_t), tensor_acc(Chat_V, scalar_t), tensor_acc(Chat_I, int64_t), tensor_acc(Chat_J, int64_t));
-    }));
-
-    /* Lexicographically sort entries of Chat first by column index then by row index */
-    lexsort_coo_ijv(Chat_I, Chat_J, Chat_V);
-
-    /* Compute nonzeros in C by counting unique column indices in Chat */
-    torch::Tensor C_nnz = torch::empty_like(Chat_nnz);
-    cuda_kernel_Chat_to_C_row_nnz<<<(C_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-        C_rows, tensor_acc(Chat_nnz_cumsum, int64_t), tensor_acc(Chat_J, int64_t), tensor_acc(C_nnz, int64_t));
-
-    /* Get C indptr by cumulative sum */
-    torch::Tensor C_indptr_t = C_nnz.cumsum(0);
-    torch::Tensor C_indptr = torch::zeros({C_rows + 1}, int_tens_opts);
-
-    C_indptr.index_put_({torch::indexing::Slice(1, torch::indexing::None, torch::indexing::None)}, C_indptr_t);
-
-    /* Now, assemble the matrix */
-    int64_t C_total_nnz = C_indptr[C_indptr.size(0) - 1].item<int64_t>();
-    torch::Tensor C_data = torch::empty({C_total_nnz}, scalar_tens_opts);
-    torch::Tensor C_indices = torch::empty({C_total_nnz}, int_tens_opts);
-
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_forward_cuda", [&] {
-        cuda_kernel_assemble_C<<<(C_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            C_rows,
-            tensor_acc(Chat_V, scalar_t), tensor_acc(Chat_nnz_cumsum, int64_t), tensor_acc(Chat_J, int64_t),
-            tensor_acc(C_data, scalar_t), tensor_acc(C_indptr, int64_t), tensor_acc(C_indices, int64_t));
-    });
-
-    return {C_data, C_indices, C_indptr};
-}
-
-/**
- * Computes C = AB^T (*) mask(C)
- *
- * Assumes the CSR structure of C is given and nonzeros are to be computed.
- * Indexed on nonzeros of C.
- */
-template <typename scalar_t>
-__global__ void cuda_kernel_spmatmat_ABt_masked(
-    int A_rows, int A_cols,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-    int B_rows, int B_cols,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> B_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
-    int C_rows, int C_cols,
-    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> C_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indices,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= C_data.size(0)) {
-        return;
-    }
-
-    /* Find row and column index */
-    int64_t col = C_indices[i];
-    int64_t row = 0, row_l = 0, row_h = C_rows - 1;
-    while (true) {
-        int64_t row_m = (row_l + row_h)/2;
-
-        if (i >= C_indptr[row_m] && i < C_indptr[row_m+1]) {
-            row = row_m;
-            break;
-        } else if (i < C_indptr[row_m]) {
-            row_h = row_m - 1;
-        } else {
-            row_l = row_m + 1;
-        }
-    }
-
-    /* Compute this entry as dot product of rows of A and B */
-    scalar_t cij = 0.;
-
-    int A_row_i = A_indptr[row];
-    int B_row_i = B_indptr[col];
-
-    int A_row_end = A_indptr[row + 1];
-    int B_row_end = B_indptr[col + 1];
-
-    while (A_row_i < A_row_end && B_row_i < B_row_end) {
-        int A_col = A_indices[A_row_i];
-        int B_col = B_indices[B_row_i];
-
-        if (A_col < B_col) {
-            A_row_i ++;
-        } else if (A_col > B_col) {
-            B_row_i ++;
-        } else {
-            cij += A_data[A_row_i] * B_data[B_row_i];
-            A_row_i ++;
-            B_row_i ++;
-        }
-    }
-
-    C_data[i] = cij;
-}
-
-/**
- * Custom coordinate pair type for when we map i,j indices -> index in nonzeros array.
- */
-struct coordinate_pair_t {
-    int64_t row;
-    int64_t col;
-
-    __host__ __device__ coordinate_pair_t(int64_t _row, int64_t _col): row(_row), col(_col) {}
-
-    __device__ bool operator==(const coordinate_pair_t& other) const {
-        return (row == other.row && col == other.col);
-    }
-};
-
-/**
- * Create a mapping between nonzero coordinates and their index in the data array.
- * Indexed on rows of the matrix.
- */
-template <typename MapView>
-__global__ void cuda_kernel_create_index_map(
-    int A_rows, int A_cols,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-    MapView A_index_map) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= A_rows) {
-        return;
-    }
-
-    for (int64_t j_i = A_indptr[i]; j_i < A_indptr[i + 1]; j_i++) {
-        int64_t j = A_indices[j_i];
-        A_index_map.insert({coordinate_pair_t(i, j), j_i});
-    }
-}
-
-/**
- * Computes the nonzeros in each row of the matrix expansion
- * in the CSR SPGEMM product, \hat{C}=A^TB (*) mask.
- * Indexed on rows of A.
- */
-template <typename MapView>
-__global__ void cuda_kernel_masked_AT_Chat_expansion_nnz(
-    int C_rows,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_nnz,
-    MapView output_index_map) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= C_rows) {
-        return;
-    }
-
-    /* Multiply row of A and row of B */
-    int64_t k_i, k, j_i, j;
-    int64_t nnz = 0;
-
-    for (k_i = A_indptr[i]; k_i < A_indptr[i + 1]; k_i++) {
-        k = A_indices[k_i];
-        for (j_i = B_indptr[i]; j_i < B_indptr[i + 1]; j_i++) {
-            j = B_indices[j_i];
-
-            if (output_index_map.contains(coordinate_pair_t(k, j))) {
-                nnz++;
-            }
-        }
-    }
-
-    Chat_nnz[i] = nnz;
-}
-
-/**
- * Computes the matrix expansion in the CSR SPGEMM product, \hat{C}=A^TB (*) mask.
- * Indexed on rows of A.
- */
-template <typename scalar_t, typename MapView>
-__global__ void cuda_kernel_masked_AT_Chat_expansion(
-    int C_rows,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> B_data,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
-    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indptr,
-    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> Chat_data,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_I,
-    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_J,
-    MapView output_index_map) {
-
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= C_rows) {
-        return;
-    }
-
-    /* Grab starting index for entries of Chat */
-    int64_t C_row_idx = 0;
-    if (i > 0) {
-        C_row_idx = Chat_indptr[i - 1];
-    }
-
-    /* Multiply row of A and row of B */
-    int64_t k_i, k, j_i, j;
-
-    for (k_i = A_indptr[i]; k_i < A_indptr[i + 1]; k_i++) {
-        k = A_indices[k_i];
-        for (j_i = B_indptr[i]; j_i < B_indptr[i + 1]; j_i++) {
-            j = B_indices[j_i];
-
-            if (output_index_map.contains(coordinate_pair_t(k, j))) {
-                /* Insert the entry only if it exists in the sparsity mask */
-
-                Chat_I[C_row_idx] = k;
-                Chat_J[C_row_idx] = j;
-                Chat_data[C_row_idx] = A_data[k_i] * B_data[j_i];
-
-                C_row_idx ++;
-            }
-        }
-    }
-}
-
-FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
-               spgemm_backward,
-               torch::Tensor grad_C, torch::Tensor C_indices, torch::Tensor C_indptr,
-               int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
-               int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
-
-    const int C_rows = A_rows;
-    const int C_cols = B_cols;
-
-    auto int_tens_opts = torch::TensorOptions()
-        .dtype(torch::kInt64)
-        .device(A_data.device().type(), A_data.device().index());
-
-    auto scalar_tens_opts = torch::TensorOptions()
-        .dtype(A_data.dtype())
-        .device(A_data.device().type(), A_data.device().index());
-
-    /* Compute grad_A = (grad_C B^T) (*) mask(A) */
-    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
-    torch::Tensor grad_A = torch::empty_like(A_data);
-
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_backward_cuda", ([&] {
-        cuda_kernel_spmatmat_ABt_masked<<<(A_data.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            C_rows, C_cols, tensor_acc(grad_C, scalar_t), tensor_acc(C_indices, int64_t), tensor_acc(C_indptr, int64_t),
-            B_rows, B_cols, tensor_acc(B_data, scalar_t), tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t),
-            A_rows, A_cols, tensor_acc(grad_A, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
-    }));
-
-    /* Compute grad_B = (A^T grad_C) (*) mask(B) */
-    const int64_t grad_B_nnz = B_indptr[B_indptr.size(0) - 1].item<int64_t>();
-
-    /* Create mapping of grad_B nonzeros to indices in grad_B data array */
-    const float map_load_factor = 0.6f;
-    cuco::static_map<coordinate_pair_t, int64_t> grad_B_idx_map(
-        static_cast<size_t>(static_cast<float>(grad_B_nnz) / map_load_factor),
-        cuco::sentinel::empty_key(coordinate_pair_t(-1, -1)),
-        cuco::sentinel::empty_value(int64_t(-1)),
-        cuco::static_map<coordinate_pair_t, int64_t>::allocator_type{},
-        main_stream);
-
-    cuda_kernel_create_index_map<<<(B_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-        B_rows, B_cols, tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t),
-        grad_B_idx_map.get_device_mutable_view());
-
-    /* Find NNZ in each row of \hat{grad_B}.  Note that this isn't actually a *row* in the
-       output, but rather just a set of work for each thread to do. */
-    torch::Tensor Bhat_nnz = torch::empty({A_rows}, int_tens_opts);
-    cuda_kernel_masked_AT_Chat_expansion_nnz<<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-        A_rows,
-        tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),
-        tensor_acc(C_indptr, int64_t), tensor_acc(C_indices, int64_t),
-        tensor_acc(Bhat_nnz, int64_t), grad_B_idx_map.get_device_view());
-
-    /* Cumulative sum to find starting point for each thread to write to. */
-    torch::Tensor Bhat_nnz_cumsum = Bhat_nnz.cumsum(0);
-    int64_t Bhat_total_nnz = Bhat_nnz_cumsum[Bhat_nnz_cumsum.size(0) - 1].item<int64_t>();
-
-    /* Compute the entries of Bhat via masked expansion */
-    torch::Tensor Bhat_I = torch::empty({Bhat_total_nnz}, int_tens_opts);
-    torch::Tensor Bhat_J = torch::empty({Bhat_total_nnz}, int_tens_opts);
-    torch::Tensor Bhat_V = torch::empty({Bhat_total_nnz}, scalar_tens_opts);
-
-    AT_DISPATCH_FLOATING_TYPES(grad_C.type(), "spgemm_backward_cuda", ([&] {
-        cuda_kernel_masked_AT_Chat_expansion<scalar_t><<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            A_rows,
-            tensor_acc(A_data, scalar_t), tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),
-            tensor_acc(grad_C, scalar_t), tensor_acc(C_indptr, int64_t), tensor_acc(C_indices, int64_t),
-            tensor_acc(Bhat_nnz_cumsum, int64_t), tensor_acc(Bhat_V, scalar_t), tensor_acc(Bhat_I, int64_t), tensor_acc(Bhat_J, int64_t),
-            grad_B_idx_map.get_device_view());
-    }));
-
-    /* Now, lexicographically sort entries of Bhat first by column index then by row index */
-    lexsort_coo_ijv(Bhat_I, Bhat_J, Bhat_V);
-
-    /* Find the ~actual~ number of nonzeros for each row of Bhat, now that we have the output */
-    Bhat_nnz_cumsum = Bhat_I.bincount(c10::nullopt, A_rows).cumsum(0);
-
-    /* Now, assemble the matrix */
-    const int64_t B_total_nnz = B_indptr[B_indptr.size(0) - 1].item<int64_t>();
-    torch::Tensor grad_B = torch::empty({B_total_nnz}, scalar_tens_opts);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_backward_cuda", [&] {
-        cuda_kernel_assemble_C_data_only<<<(B_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            B_rows,
-            tensor_acc(Bhat_V, scalar_t), tensor_acc(Bhat_nnz_cumsum, int64_t), tensor_acc(Bhat_J, int64_t),
-            tensor_acc(grad_B, scalar_t), tensor_acc(B_indptr, int64_t));
-    });
-
-    return {grad_A, grad_B};
 }
 
 /**
@@ -968,6 +259,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     cuda_kernel_csr_nnz_per_col<<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
         A_rows, A_columns,
         tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t), At_indptr_tmp);
+    cuda_check_kernel_launch_err();
 
     /* Now, compute the cumulative sum of nnz to get starting rowptrs of A^T */
     cub_cumsum(At_indptr_tmp, At_indptr_raw + 1, A_columns, main_stream);
@@ -983,56 +275,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(At_data, scalar_t), tensor_acc(At_indices, int64_t), tensor_acc(At_indptr, int64_t),
             tensor_acc(At_to_A_idx, int64_t));
     }));
-
-    return {At_data, At_indices, At_indptr, At_to_A_idx};
-}
-
-std::vector<torch::Tensor>
-csr_transpose_forward_cuda_old(
-    int A_rows, int A_columns,
-    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
-    /* Based on the serial implementation from Scipy:
-       https://github.com/scipy/scipy/blob/3b36a574dc657d1ca116f6e230be694f3de31afc/scipy/sparse/sparsetools/csr.h#L380 */
-
-    const int64_t nnz = A_indptr[A_rows].item<int>();
-
-    auto int_tens_opts = torch::TensorOptions()
-        .dtype(torch::kInt64)
-        .device(A_data.device().type(), A_data.device().index());
-
-    auto scalar_tens_opts = torch::TensorOptions()
-        .dtype(A_data.dtype())
-        .device(A_data.device().type(), A_data.device().index());
-
-    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
-
-    torch::Tensor At_data = torch::empty(nnz, scalar_tens_opts);
-    torch::Tensor At_indptr;
-    torch::Tensor At_indices = torch::empty(nnz, int_tens_opts);
-    int64_t* At_indptr_raw;
-    cuda_check_err(cudaMalloc(&At_indptr_raw, (A_columns + 1) * sizeof(int64_t)));
-    cuda_check_err(cudaMemsetAsync(At_indptr_raw, 0, (A_columns + 1) * sizeof(int64_t), main_stream));
-
-    /* Compute number of nonzeros per column of A */
-    cuda_kernel_csr_nnz_per_col<<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-        A_rows, A_columns,
-        tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t), At_indptr_raw);
-    At_indptr = torch::from_blob(At_indptr_raw, { static_cast<int64_t>(A_columns + 1) }, cudaFree, int_tens_opts);
-
-    /* Now, compute the cumulative sum of nnz to get starting rowptrs of A^T */
-    torch::Tensor At_indptr_t = At_indptr.index({torch::indexing::Slice(0, -1)}).cumsum(0);
-    At_indptr.index_put_({torch::indexing::Slice(1, torch::indexing::None, torch::indexing::None)}, At_indptr_t);
-    At_indptr[0] = 0;
-
-    /* Move data values into their correct spots */
-    torch::Tensor At_to_A_idx = torch::empty(nnz, int_tens_opts);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_transpose_forward_cuda", ([&] {
-        cuda_kernel_csr_transpose_accumulate<<<(A_columns + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            A_rows, A_columns,
-            tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
-            tensor_acc(At_data, scalar_t), tensor_acc(At_indices, int64_t), tensor_acc(At_indptr, int64_t),
-            tensor_acc(At_to_A_idx, int64_t));
-    }));
+    cuda_check_kernel_launch_err();
 
     return {At_data, At_indices, At_indptr, At_to_A_idx};
 }
@@ -1048,6 +291,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
         cuda_kernel_tensor_permute<<<(grad_At.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             grad_At.size(0), tensor_acc(grad_At, scalar_t), tensor_acc(grad_A, scalar_t), tensor_acc(At_to_A_idx, int64_t), false);
     }));
+    cuda_check_kernel_launch_err();
 
     return grad_A;
 }
@@ -1208,6 +452,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
         tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
         tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t),
         tensor_acc(nnz_per_row, int64_t));
+    cuda_check_kernel_launch_err();
     torch::Tensor cum_nnz_per_row = nnz_per_row.cumsum(0);
     const int64_t total_nnz = cum_nnz_per_row[rows - 1].item<int64_t>();
 
@@ -1222,6 +467,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(B_data, scalar_t), tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t),
             tensor_acc(cum_nnz_per_row, int64_t), tensor_acc(C_data, scalar_t), tensor_acc(C_indices, int64_t), tensor_acc(C_indptr, int64_t));
     }));
+    cuda_check_kernel_launch_err();
 
     return {C_data, C_indices, C_indptr};
 }
@@ -1280,6 +526,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(grad_C_data, scalar_t), tensor_acc(C_indices, int64_t), tensor_acc(C_indptr, int64_t),
             tensor_acc(grad_A, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
     }));
+    cuda_check_kernel_launch_err();
 
     /* grad_B = (beta * grad_c) (*) mask(A) */
     torch::Tensor grad_B = torch::empty_like(B_data);
@@ -1289,6 +536,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(grad_C_data, scalar_t), tensor_acc(C_indices, int64_t), tensor_acc(C_indptr, int64_t),
             tensor_acc(grad_B, scalar_t), tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t));
     }));
+    cuda_check_kernel_launch_err();
 
     return {grad_A, grad_B};
 }
@@ -1351,6 +599,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
             tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
             tensor_acc_3(B, 2, scalar_t), tensor_acc_3(C, 2, scalar_t));
     }));
+    cuda_check_kernel_launch_err();
 
     return C;
 }
@@ -1368,21 +617,33 @@ __global__ void cuda_kernel_spdmm_backward_masked_A(const int64_t A_rows, const 
                                                     const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> B,
                                                     const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> grad_C) {
 
-    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= A_rows) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= grad_A_data.size(0)) {
         return;
     }
 
-    for (int64_t i_i = A_indptr[i]; i_i < A_indptr[i + 1]; i_i++) {
-        const int64_t j = A_indices[i_i];
-        scalar_t a_ij = 0.;
+    /* Find row and column index */
+    int64_t col = A_indices[out_idx];
+    int64_t row = 0, row_l = 0, row_h = A_rows - 1;
+    while (true) {
+        int64_t row_m = (row_l + row_h)/2;
 
-        for (int64_t k = 0; k < B.size(1); k++) {
-            a_ij += grad_C[i][k] * B[j][k];
+        if (out_idx >= A_indptr[row_m] && out_idx < A_indptr[row_m+1]) {
+            row = row_m;
+            break;
+        } else if (out_idx < A_indptr[row_m]) {
+            row_h = row_m - 1;
+        } else {
+            row_l = row_m + 1;
         }
-
-        grad_A_data[i_i] = a_ij;
     }
+    __syncthreads();
+
+    scalar_t a_ij = 0.;
+    for (int64_t k = 0; k < B.size(1); k++) {
+        a_ij += grad_C[row][k] * B[col][k];
+    }
+    grad_A_data[out_idx] = a_ij;
 }
 
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
@@ -1399,13 +660,12 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     /* grad_A = (grad_C * B^T) (*) mask(A) */
     torch::Tensor grad_A = torch::empty_like(A_data);
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_backward_cuda", ([&] {
-        cuda_kernel_spdmm_backward_masked_A<scalar_t><<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+        cuda_kernel_spdmm_backward_masked_A<scalar_t><<<(A_data.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             A_rows, A_cols,
             tensor_acc(grad_A, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
             tensor_acc_3(B, 2, scalar_t), tensor_acc_3(grad_C, 2, scalar_t));
     }));
-
-    main_stream.synchronize();
+    cuda_check_kernel_launch_err();
 
     /* grad_B = (A^T * grad_C) */
     auto At = csr_transpose_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
@@ -1421,6 +681,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(At[0], scalar_t), tensor_acc(At[1], int64_t), tensor_acc(At[2], int64_t),
             tensor_acc_3(grad_C, 2, scalar_t), tensor_acc_3(grad_B, 2, scalar_t));
     }));
+    cuda_check_kernel_launch_err();
 
     return {grad_A, grad_B};
 }
@@ -1514,7 +775,6 @@ __global__ void cuda_kernel_sptrsv_forward_upper(const int64_t A_rows, const int
     }
 }
 
-
 FUNC_IMPL_CUDA(torch::Tensor,
               sptrsv_forward,
               int A_rows, int A_cols,
@@ -1547,6 +807,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
                 tensor_acc(b, scalar_t), x_raw, unit, value_available);
         }
     }));
+    cuda_check_kernel_launch_err();
 
     cuda_check_err(cudaFreeAsync(value_available, main_stream));
     x_dbl = torch::from_blob(x_raw, { static_cast<int64_t>(A_rows) }, cudaFree, options);
@@ -1577,6 +838,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             A_rows, A_cols, -1., tensor_acc(grad_b, scalar_t), tensor_acc(x, scalar_t),
             tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t), tensor_acc(grad_A_data, scalar_t));
     }));
+    cuda_check_kernel_launch_err();
 
     return {grad_A_data, grad_b};
 }
@@ -1615,6 +877,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_nnz(
             vert_fill[thread_idx * A_cols + v] = row;
             vert_mask[thread_idx * A_cols + v] = true;
         }
+        __syncthreads();
 
         /* Loop over "threshold" */
         for (int64_t t = 0; t < row; t++) {
@@ -1697,6 +960,7 @@ __global__ void cuda_kernel_splu_symbolic_fact_trav_populate(
             vert_fill[thread_idx * A_rows + v] = row;
             vert_mask[thread_idx * A_rows + v] = true;
         }
+        __syncthreads();
 
         /* Loop over "threshold" */
         for (int64_t t = 0; t < row; t++) {
@@ -1892,8 +1156,8 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
 
     /* First, perform the symbolic factorization to determine the sparsity pattern of the filled-in LU factorization
        of A, which we will hereby denote by As.  Note that mask(As) \superset mask(A). */
-    const int64_t num_threads_symb = 256;
-    const int64_t num_blocks_symb = 1;
+    const int64_t num_threads_symb = 32;
+    const int64_t num_blocks_symb = 8;
     const int64_t total_threads_symb = num_threads_symb * num_blocks_symb;
     int64_t* vert_fill;
     int64_t* vert_queue;
@@ -1913,6 +1177,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     cuda_kernel_splu_symbolic_fact_trav_nnz<<<num_blocks_symb, num_threads_symb, 0, main_stream>>>(
         A_rows, A_cols, tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
         vert_fill, vert_queue, vert_mask, As_row_nnz);
+    cuda_check_kernel_launch_err();
 
     /* From the row nnz, compute row pointers */
     cuda_check_err(cudaMemsetAsync(As_row_indptr_raw, 0, sizeof(int64_t), main_stream));
@@ -1932,6 +1197,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             A_rows, A_cols, tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
             vert_fill, vert_queue, vert_mask, tensor_acc(As_data, scalar_t), tensor_acc(As_indices, int64_t), As_row_indptr_raw);
     }));
+    cuda_check_kernel_launch_err();
     cuda_check_err(cudaFreeAsync(vert_fill, main_stream));
     cuda_check_err(cudaFreeAsync(vert_queue, main_stream));
     cuda_check_err(cudaFreeAsync(vert_mask, main_stream));
@@ -1945,12 +1211,14 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     /* Perform the numeric factorization on the CSC representation */
     cuda_kernel_count_U_nnz<<<(A_cols + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
         A_rows, A_cols, tensor_acc(AsT_indices, int64_t), tensor_acc(AsT_indptr, int64_t), U_col_nnz);
+    cuda_check_kernel_launch_err();
 
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splu_cuda", ([&] {
         cuda_kernel_splu_numeric_sflu<<<(A_cols + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             A_rows, A_cols,
             tensor_acc(AsT_data, scalar_t), tensor_acc(AsT_indices, int64_t), tensor_acc(AsT_indptr, int64_t), U_col_nnz);
     }));
+    cuda_check_kernel_launch_err();
     cuda_check_err(cudaFreeAsync(U_col_nnz, main_stream));
 
     /* Transpose back into CSR format */
@@ -1978,6 +1246,87 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             A_rows, A_cols, -1., tensor_acc(grad_b, scalar_t), tensor_acc(x, scalar_t),
             tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t), tensor_acc(grad_A_data, scalar_t));
     }));
+    cuda_check_kernel_launch_err();
 
     return {grad_A_data, grad_b};
+}
+
+template <typename scalar_t>
+__global__ void kernel_csr_to_dense_forward(
+    int A_rows, int A_cols,
+    torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> A_dense,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
+
+    const int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= A_rows) {
+        return;
+    }
+
+    for (int64_t row_i = A_indptr[row]; row_i < A_indptr[row + 1]; row_i++) {
+        const int64_t col = A_indices[row_i];
+        A_dense[row][col] = A_data[row_i];
+    }
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+              csr_to_dense_forward,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+
+    torch::Tensor A_d = torch::zeros({A_rows, A_cols}, scalar_tens_opts);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_to_dense_forward_cuda", ([&] {
+        kernel_csr_to_dense_forward<<<
+            (A_rows + threads_per_block - 1) / threads_per_block,
+            threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc_3(A_d, 2, scalar_t),
+                tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
+    }));
+
+    return A_d;
+}
+
+template <typename scalar_t>
+__global__ void kernel_csr_to_dense_backward(
+    int A_rows, int A_cols,
+    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> A_dense_grad,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data_grad,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
+
+    const int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= A_rows) {
+        return;
+    }
+
+    for (int64_t row_i = A_indptr[row]; row_i < A_indptr[row + 1]; row_i++) {
+        const int64_t col = A_indices[row_i];
+        A_data_grad[row_i] = A_dense_grad[row][col];
+    }
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+              csr_to_dense_backward,
+              torch::Tensor grad_Ad,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_to_dense_backward_cuda", ([&] {
+        kernel_csr_to_dense_backward<<<
+            (A_rows + threads_per_block - 1) / threads_per_block,
+            threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc_3(grad_Ad, 2, scalar_t),
+                tensor_acc(grad_A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
+    }));
+
+    return grad_A_data;
 }

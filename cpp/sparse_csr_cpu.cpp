@@ -1046,3 +1046,54 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     return {grad_A_data, grad_b};
 }
+
+FUNC_IMPL_CPU(torch::Tensor,
+              csr_to_dense_forward,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype());
+
+    torch::Tensor A_d = torch::zeros({A_rows, A_cols}, scalar_tens_opts);
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_to_dense_forward_cpu", ([&] {
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+        auto A_d_acc = A_d.accessor<scalar_t, 2>();
+
+        for (int64_t i = 0; i < A_rows; i++) {
+            for (int64_t i_i = A_indptr_acc[i]; i_i < A_indptr_acc[i + 1]; i_i++) {
+                const int64_t j = A_indices_acc[i_i];
+                A_d[i][j] = A_data_acc[i_i];
+            }
+        }
+    }));
+
+    return A_d;
+}
+
+FUNC_IMPL_CPU(torch::Tensor,
+              csr_to_dense_backward,
+              torch::Tensor grad_Ad,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_to_dense_backward_cpu", ([&] {
+        auto grad_A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+        const auto grad_A_d_acc = grad_Ad.accessor<scalar_t, 2>();
+
+        for (int64_t i = 0; i < A_rows; i++) {
+            for (int64_t i_i = A_indptr_acc[i]; i_i < A_indptr_acc[i + 1]; i_i++) {
+                const int64_t j = A_indices_acc[i_i];
+                grad_A_data_acc[i_i] = grad_A_d_acc[i][j];
+            }
+        }
+    }));
+
+    return grad_A_data;
+}

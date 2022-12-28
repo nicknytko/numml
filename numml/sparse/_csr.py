@@ -12,6 +12,7 @@ class NotFoundModule:
     def __getattr__(self, key):
         raise RuntimeError(f'Cannot get field {key}, {self.modname} is not installed or not available for import on this system.')
 
+
 class LazyImportModule:
     def __init__(self, modname):
         self.modname = modname
@@ -22,18 +23,35 @@ class LazyImportModule:
             self.module = importlib.import_module(self.modname)
         return getattr(self.module, key)
 
+
 def try_import(modname):
     try:
         return importlib.import_module(modname)
     except ImportError:
         return NotFoundModule(modname)
 
+
 def try_import_lazy(modname):
     return LazyImportModule(modname)
+
 
 sci_sp = try_import('scipy.sparse')
 cupy = try_import_lazy('cupy')
 cupy_sp = try_import_lazy('cupyx.scipy.sparse')
+
+
+def numpy_to_torch_dtype(np_type):
+    if np_type == np.int32:
+        return torch.int32
+    elif np_type == np.int64:
+        return torch.int64
+    elif np_type == np.float32:
+        return torch.float32
+    elif np_type == np.float64:
+        return torch.float64
+    else:
+        raise RuntimeError(f'Unknown numpy type for conversion: {np_type}.')
+
 
 def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
     '''
@@ -185,76 +203,6 @@ class splincomb(torch.autograd.Function):
                 None) # B_rowptr
 
 
-def eye(N, k=0):
-    assert(abs(k) < N)
-
-    N_k = N - abs(k)
-    rows = None
-    cols = None
-    vals = torch.ones(N_k)
-
-    if k == 0:
-        rows = torch.arange(N)
-        cols = torch.arange(N)
-    elif k > 0:
-        rows = torch.arange(N_k)
-        cols = torch.arange(k, N)
-    else:
-        rows = torch.arange(abs(k), N)
-        cols = torch.arange(N_k)
-
-    return SparseCSRTensor((vals, (rows, cols)), shape=(N, N))
-
-
-def diag(x, k=0):
-    N_k = len(x)
-    N = N_k + abs(k)
-    rows = None
-    cols = None
-
-    if k == 0:
-        rows = torch.arange(N)
-        cols = torch.arange(N)
-    elif k > 0:
-        rows = torch.arange(N_k)
-        cols = torch.arange(k, N)
-    else:
-        rows = torch.arange(abs(k), N)
-        cols = torch.arange(N_k)
-
-    return SparseCSRTensor((x, (rows, cols)), shape=(N, N))
-
-
-def spouter(x, y):
-    '''
-    Returns the outer product of two vectors as a sparse matrix.
-    Note that this is only beneficial if x and y are themselves reasonably sparse, otherwise
-    it is likely better to use the regular dense outer product.
-
-    Parameters
-    ----------
-    x : torch.Tensor
-      First term in outer product
-    y : torch.Tensor
-      Second term in outer product
-
-    Returns
-    -------
-    xyT : SparseCSRTensor
-      The product x * y^T as a sparse tensor.
-    '''
-
-    x_nz = torch.nonzero(x).flatten()
-    y_nz = torch.nonzero(y).flatten()
-
-    row, col = torch.meshgrid(x_nz, y_nz, indexing='ij')
-    row = row.flatten()
-    col = col.flatten()
-
-    val = x[row] * y[col]
-    return SparseCSRTensor((val, (row, col)), shape=(len(x), len(y)))
-
-
 class tril(torch.autograd.Function):
     @staticmethod
     def forward(ctx, shape,
@@ -382,7 +330,6 @@ class spdmm(torch.autograd.Function):
 
         C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
                                           A_data, A_indices, A_indptr, B)
-
         return C
 
     @staticmethod
@@ -401,6 +348,103 @@ class spdmm(torch.autograd.Function):
                 grad_B) # B
 
 
+class sptodense(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr):
+        ctx.save_for_backward(A_data, A_indices, A_indptr)
+        ctx.A_shape = A_shape
+
+        A_d = numml_torch_cpp.csr_to_dense_forward(A_shape[0], A_shape[1],
+                                                   A_data, A_indices, A_indptr)
+        return A_d
+
+    @staticmethod
+    def backward(ctx, grad_A_dense):
+        A_data, A_indices, A_indptr = ctx.saved_tensors
+        A_shape = ctx.A_shape
+
+        grad_A_data = numml_torch_cpp.csr_to_dense_backward(grad_A_dense, A_shape[0], A_shape[1],
+                                                            A_data, A_indices, A_indptr)
+
+        return (None,        # A_shape
+                grad_A_data, # A_data
+                None,        # A_indices
+                None)        # A_indptr
+
+
+def eye(N, k=0, dtype=torch.float32, device='cpu'):
+    assert(abs(k) < N)
+
+    N_k = N - abs(k)
+    rows = None
+    cols = None
+    vals = torch.ones(N_k, dtype=dtype, device=device)
+
+    if k == 0:
+        rows = torch.arange(N, device=device)
+        cols = torch.arange(N, device=device)
+    elif k > 0:
+        rows = torch.arange(N_k, device=device)
+        cols = torch.arange(k, N, device=device)
+    else:
+        rows = torch.arange(abs(k), N, device=device)
+        cols = torch.arange(N_k, device=device)
+
+    return SparseCSRTensor((vals, (rows, cols)), shape=(N, N), dtype=dtype, device=device)
+
+
+def diag(x, k=0):
+    N_k = len(x)
+    N = N_k + abs(k)
+    rows = None
+    cols = None
+
+    device = x.device
+    dtype = x.dtype
+
+    if k == 0:
+        rows = torch.arange(N, device=device)
+        cols = torch.arange(N, device=device)
+    elif k > 0:
+        rows = torch.arange(N_k, device=device)
+        cols = torch.arange(k, N, device=device)
+    else:
+        rows = torch.arange(abs(k), N, device=device)
+        cols = torch.arange(N_k, device=device)
+
+    return SparseCSRTensor((x, (rows, cols)), shape=(N, N), dtype=x.dtype, device=device)
+
+
+def spouter(x, y):
+    '''
+    Returns the outer product of two vectors as a sparse matrix.
+    Note that this is only beneficial if x and y are themselves reasonably sparse, otherwise
+    it is likely better to use the regular dense outer product.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+      First term in outer product
+    y : torch.Tensor
+      Second term in outer product
+
+    Returns
+    -------
+    xyT : SparseCSRTensor
+      The product x * y^T as a sparse tensor.
+    '''
+
+    x_nz = torch.nonzero(x).flatten()
+    y_nz = torch.nonzero(y).flatten()
+
+    row, col = torch.meshgrid(x_nz, y_nz, indexing='ij')
+    row = row.flatten()
+    col = col.flatten()
+
+    val = x[row] * y[col]
+    return SparseCSRTensor((val, (row, col)), shape=(len(x), len(y)))
+
+
 def unpack_csr(A):
     return A.data, A.indices, A.indptr, A.shape
 
@@ -410,7 +454,7 @@ def repack_csr(A_data, A_indices, A_indptr, A_shape):
 
 
 class SparseCSRTensor(object):
-    def __init__(self, arg1, shape=None, clone=True):
+    def __init__(self, arg1, shape=None, clone=True, dtype=None, device=None):
         '''
         Compressed Sparse Row matrix (tensor) with gradient support on
         nonzero entries.
@@ -453,9 +497,14 @@ class SparseCSRTensor(object):
                 self.shape = arg1.shape
         elif isinstance(arg1, sci_sp.spmatrix):
             arg_csr = arg1.tocsr()
-            self.data = torch.Tensor(arg_csr.data.copy())
-            self.indices = torch.Tensor(arg_csr.indices.copy()).long()
-            self.indptr = torch.Tensor(arg_csr.indptr.copy()).long()
+            if dtype is None:
+                dtype = numpy_to_torch_dtype(arg_csr.data.dtype)
+            if device is None:
+                device = torch.device('cpu')
+
+            self.data = torch.Tensor(arg_csr.data.copy()).type(dtype).to(device)
+            self.indices = torch.Tensor(arg_csr.indices.copy()).long().to(device)
+            self.indptr = torch.Tensor(arg_csr.indptr.copy()).long().to(device)
             self.shape = arg_csr.shape
         elif isinstance(arg1, tuple):
             if len(arg1) == 3:
@@ -463,26 +512,36 @@ class SparseCSRTensor(object):
                 assert(shape is not None)
 
                 if isinstance(arg1[0], np.ndarray):
-                    self.data = torch.Tensor(arg1[0].copy())
+                    if dtype is None:
+                        dtype = numpy_to_torch_dtype(arg_csr.data.dtype)
+                    if device is None:
+                        device = torch.device('cpu')
+
+                    self.data = torch.Tensor(arg1[0].copy()).type(dtype).to(device)
                 elif isinstance(arg1[1], torch.Tensor):
+                    if dtype is None:
+                        dtype = arg1[0].dtype
+                    if device is None:
+                        device = arg1[0].device
+
                     if clone:
-                        self.data = torch.clone(arg1[0])
+                        self.data = torch.clone(arg1[0]).type(dtype).to(device)
                     else:
                         self.data = arg1[0]
 
                 if isinstance(arg1[1], np.ndarray):
-                    self.indices = torch.Tensor(arg1[1].copy()).long()
+                    self.indices = torch.Tensor(arg1[1].copy()).long().to(device)
                 elif isinstance(arg1[1], torch.Tensor):
                     if clone:
-                        self.indices = torch.clone(arg1[1]).long()
+                        self.indices = torch.clone(arg1[1]).long().to(device)
                     else:
                         self.indices = arg1[1]
 
                 if isinstance(arg1[2], np.ndarray):
-                    self.indptr = torch.Tensor(arg1[2].copy()).long()
+                    self.indptr = torch.Tensor(arg1[2].copy()).long().to(device)
                 elif isinstance(arg1[2], torch.Tensor):
                     if clone:
-                        self.indptr = torch.clone(arg1[2]).long()
+                        self.indptr = torch.clone(arg1[2]).long().to(device)
                     else:
                         self.indptr = arg1[2]
 

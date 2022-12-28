@@ -117,4 +117,16 @@ FUNC_DEF(std::vector<torch::Tensor>,
          torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
 
+/* To Dense */
+FUNC_DEF(torch::Tensor,
+         csr_to_dense_forward,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+FUNC_DEF(torch::Tensor,
+         csr_to_dense_backward,
+         torch::Tensor grad_Ad,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
 #endif
