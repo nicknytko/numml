@@ -5,6 +5,8 @@
 #include <cuco/detail/hash_functions.cuh>
 #include <cuco/allocator.hpp>
 
+#include <chrono>
+
 /**
  * Find the number of nonzeros for two sparse CSR matrices.
  * Indexed on rows of A.
@@ -557,13 +559,55 @@ __global__ void cuda_kernel_AT_Chat_expansion(
         for (j_i = B_indptr[i]; j_i < B_indptr[i + 1]; j_i++) {
             j = B_indices[j_i];
 
-            /* Insert the entry only if it exists in the sparsity mask */
-
             Chat_I[C_row_idx] = k;
             Chat_J[C_row_idx] = j;
             Chat_data[C_row_idx] = A_data[k_i] * B_data[j_i];
 
             C_row_idx ++;
+        }
+    }
+}
+
+__global__ void cuda_kernel_compute_indptr(
+    int Chat_rows, const int tile_size,
+    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_indptr,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> Chat_I) {
+
+    const int64_t Chat_size = Chat_I.size(0);
+    const int64_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t start_idx = thread_idx * tile_size;
+    const int64_t end_idx = min((thread_idx + 1) * tile_size, Chat_size);
+
+    if (start_idx >= end_idx) {
+        return;
+    }
+
+    __syncthreads();
+
+    int64_t cur_row = Chat_I[start_idx];
+    for (int64_t i = start_idx; i < end_idx; i++) {
+        if (Chat_I[i] != cur_row) {
+            /* If we have hit an index w/ new row, then update all intermediate indptrs to
+               start at the new index */
+            const int64_t new_row = Chat_I[i];
+            for (int64_t j = cur_row + 1; j <= new_row; j++) {
+                Chat_indptr[j] = i;
+            }
+            cur_row = new_row;
+        }
+    }
+
+    __syncthreads();
+
+    if (end_idx < Chat_size &&
+        Chat_I[end_idx] != cur_row) {
+        const int64_t new_row = Chat_I[end_idx];
+        for (int64_t j = cur_row + 1; j <= new_row; j++) {
+            Chat_indptr[j] = end_idx;
+        }
+    } else if (end_idx == Chat_size) {
+        for (int64_t j = cur_row + 1; j <= Chat_rows; j++) {
+            Chat_indptr[Chat_rows] = Chat_size;
         }
     }
 }
@@ -586,8 +630,8 @@ __global__ void cuda_kernel_assemble_C_masked(
         return;
     }
 
-    const int64_t start_idx_Chat = (i > 0 ? Chat_indptr[i-1] : 0);
-    const int64_t end_idx_Chat = Chat_indptr[i];
+    const int64_t start_idx_Chat = Chat_indptr[i];
+    const int64_t end_idx_Chat = Chat_indptr[i + 1];
     const int64_t start_idx_C = C_indptr[i];
     const int64_t end_idx_C = C_indptr[i + 1];
     int64_t cur_idx_Chat = start_idx_Chat;
@@ -753,7 +797,13 @@ static torch::Tensor spgemm_backward_grad_B_nonsquare(torch::Tensor grad_C, torc
     lexsort_coo_ijv(Bhat_I, Bhat_J, Bhat_V);
 
     /* Find the ~actual~ number of nonzeros for each row of Bhat, now that we have the output */
-    Bhat_nnz_cumsum = Bhat_I.bincount(c10::nullopt, B_rows).cumsum(0);
+    Bhat_nnz_cumsum = torch::zeros({B_rows + 1}, int_tens_opts);
+    const int tile_size = 64;
+    const int num_threads = (Bhat_total_nnz + (threads_per_block * tile_size) - 1) /
+        (threads_per_block * tile_size);
+    cuda_kernel_compute_indptr<<<num_threads, threads_per_block, 0, main_stream>>>(
+        B_rows, tile_size, tensor_acc(Bhat_nnz_cumsum, int64_t), tensor_acc(Bhat_I, int64_t));
+    cuda_check_kernel_launch_err();
 
     /* Now, assemble the matrix */
     const int64_t B_total_nnz = B_indptr[B_indptr.size(0) - 1].item<int64_t>();
@@ -799,8 +849,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     cuda_check_kernel_launch_err();
 
     torch::Tensor grad_B;
-    if (A_rows == A_cols && A_cols == B_cols) {
-        //if (false) {
+    if (false) {
         grad_B = spgemm_backward_grad_B_square(grad_C, C_indices, C_indptr,
                                                A_rows, A_cols, A_data, A_indices, A_indptr,
                                                B_rows, B_cols, B_data, B_indices, B_indptr);

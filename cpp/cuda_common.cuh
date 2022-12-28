@@ -100,4 +100,34 @@ __global__ void cuda_kernel_tensor_permute(
 }
 
 void lexsort_coo_ijv(torch::Tensor& Bhat_I, torch::Tensor& Bhat_J, torch::Tensor& Bhat_V);
+
+template <typename type_t>
+__global__ void cuda_kernel_tensor_memset(
+    torch::PackedTensorAccessor64<type_t, 1, torch::RestrictPtrTraits> x,
+    const int64_t tile_size,
+    const type_t value) {
+
+    const int64_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t start_idx = thread_idx * tile_size;
+    const int64_t end_idx = min((thread_idx + 1) * tile_size, x.size(0));
+
+    if (start_idx >= end_idx) {
+        return;
+    }
+
+    __syncthreads();
+    for (int64_t i = start_idx; i < end_idx; i++) {
+        x[i] = value;
+    }
+}
+
+template <typename type_t>
+void cuda_tensor_memset(torch::Tensor& x, const type_t value) {
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    const int tile_size = 64;
+    const int num_threads = (x.size(0) + (threads_per_block * tile_size) - 1) /
+        (threads_per_block * tile_size);
+    cuda_kernel_tensor_memset<<<num_threads, threads_per_block, 0, main_stream>>>(
+        tensor_acc(x, type_t), tile_size, value);
+}
 #endif

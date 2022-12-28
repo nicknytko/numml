@@ -11,8 +11,6 @@
 #include "cuda_common.cuh"
 #include "sparse_csr.hpp"
 
-#include <chrono>
-
 /* Sparse GEMV */
 
 /**
