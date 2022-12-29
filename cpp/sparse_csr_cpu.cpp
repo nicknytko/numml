@@ -1047,6 +1047,8 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     return {grad_A_data, grad_b};
 }
 
+/* CSR To dense */
+
 FUNC_IMPL_CPU(torch::Tensor,
               csr_to_dense_forward,
               int A_rows, int A_cols,
@@ -1091,6 +1093,59 @@ FUNC_IMPL_CPU(torch::Tensor,
             for (int64_t i_i = A_indptr_acc[i]; i_i < A_indptr_acc[i + 1]; i_i++) {
                 const int64_t j = A_indices_acc[i_i];
                 grad_A_data_acc[i_i] = grad_A_d_acc[i][j];
+            }
+        }
+    }));
+
+    return grad_A_data;
+}
+
+/* CSR Row sum */
+FUNC_IMPL_CPU(torch::Tensor,
+              csr_row_sum_forward,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype());
+
+    torch::Tensor x = torch::empty({A_rows}, scalar_tens_opts);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_row_sum_forward_cpu", ([&] {
+        auto x_acc = x.accessor<scalar_t, 1>();
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+
+        for (int64_t row = 0; row < A_rows; row++) {
+            scalar_t acc = 0.;
+            for (int64_t i = A_indptr_acc[row]; i < A_indptr_acc[row + 1]; i++) {
+                acc += A_data_acc[i];
+            }
+            x_acc[row] = acc;
+        }
+    }));
+
+    return x;
+}
+
+FUNC_IMPL_CPU(torch::Tensor,
+              csr_row_sum_backward,
+              torch::Tensor grad_x,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_row_sum_backward_cpu", ([&] {
+        const auto grad_x_acc = grad_x.accessor<scalar_t, 1>();
+        auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+
+        for (int64_t row = 0; row < A_rows; row++) {
+            for (int64_t i = A_indptr_acc[row]; i < A_indptr_acc[row + 1]; i++) {
+                grad_A_data_acc[i] = grad_x_acc[row];
             }
         }
     }));

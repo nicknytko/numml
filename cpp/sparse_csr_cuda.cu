@@ -1249,6 +1249,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     return {grad_A_data, grad_b};
 }
 
+/* CSR To dense */
 template <typename scalar_t>
 __global__ void kernel_csr_to_dense_forward(
     int A_rows, int A_cols,
@@ -1324,6 +1325,87 @@ FUNC_IMPL_CUDA(torch::Tensor,
             threads_per_block, 0, main_stream>>>(
                 A_rows, A_cols, tensor_acc_3(grad_Ad, 2, scalar_t),
                 tensor_acc(grad_A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
+    }));
+
+    return grad_A_data;
+}
+
+/* CSR Row sum */
+template <typename scalar_t>
+__global__ void kernel_csr_row_sum_forward(
+    int A_rows, int A_cols,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> x,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
+
+    const int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= A_rows) {
+        return;
+    }
+
+    scalar_t acc = 0.;
+    for (int64_t row_i = A_indptr[row]; row_i < A_indptr[row + 1]; row_i++) {
+        acc += A_data[row_i];
+    }
+    x[row] = acc;
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+               csr_row_sum_forward,
+               int A_rows, int A_cols,
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+
+    torch::Tensor x = torch::empty({A_rows}, scalar_tens_opts);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_row_sum_forward_cuda", ([&] {
+        kernel_csr_row_sum_forward<<<
+            (A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc(x, scalar_t), tensor_acc(A_data, scalar_t),
+                tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
+    }));
+
+    return x;
+}
+
+template <typename scalar_t>
+__global__ void kernel_csr_row_sum_backward(
+    int A_rows, int A_cols,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_x,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
+
+    const int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= A_rows) {
+        return;
+    }
+
+    const scalar_t grad_row = grad_x[row];
+    for (int64_t row_i = A_indptr[row]; row_i < A_indptr[row + 1]; row_i++) {
+        grad_A_data[row_i] = grad_row;
+    }
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+               csr_row_sum_backward,
+               torch::Tensor grad_x,
+               int A_rows, int A_cols,
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_row_sum_backward_cuda", ([&] {
+        kernel_csr_row_sum_backward<<<
+            (A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc(grad_x, scalar_t), tensor_acc(grad_A_data, scalar_t),
+                tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
     }));
 
     return grad_A_data;

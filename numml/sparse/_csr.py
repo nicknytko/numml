@@ -372,6 +372,30 @@ class sptodense(torch.autograd.Function):
                 None)        # A_indptr
 
 
+class sprowsum(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr):
+        ctx.save_for_backward(A_data, A_indices, A_indptr)
+        ctx.A_shape = A_shape
+
+        x = numml_torch_cpp.csr_row_sum_forward(A_shape[0], A_shape[1],
+                                                A_data, A_indices, A_indptr)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        A_data, A_indices, A_indptr = ctx.saved_tensors
+        A_shape = ctx.A_shape
+
+        grad_A_data = numml_torch_cpp.csr_row_sum_backward(grad_x, A_shape[0], A_shape[1],
+                                                           A_data, A_indices, A_indptr)
+
+        return (None,        # A_shape
+                grad_A_data, # A_data
+                None,        # A_indices
+                None)        # A_indptr
+
+
 def eye(N, k=0, dtype=torch.float32, device='cpu'):
     assert(abs(k) < N)
 
@@ -624,11 +648,7 @@ class SparseCSRTensor(object):
           Dense output
         '''
 
-        X = torch.zeros(self.shape, device=self.data.device)
-        for row_i in range(len(self.indptr) - 1):
-            for data_j in range(self.indptr[row_i], self.indptr[row_i + 1]):
-                X[row_i, self.indices[data_j]] = self.data[data_j]
-        return X
+        return sptodense.apply(self.shape, self.data, self.indices, self.indptr)
 
     def to_coo(self):
         '''
@@ -712,10 +732,7 @@ class SparseCSRTensor(object):
           Tensor such that row_sum[i] is the sum of entries in row i
         '''
 
-        rs = torch.empty(self.shape[1], dtype=self.data.dtype, device=self.device)
-        for i in range(self.shape[0]):
-            rs[i] = torch.sum(self.data[self.indptr[i] : self.indptr[i+1]])
-        return rs
+        return sprowsum.apply(self.shape, self.data, self.indices, self.indptr)
 
     def abs(self):
         '''

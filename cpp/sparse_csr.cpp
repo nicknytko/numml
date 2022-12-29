@@ -243,6 +243,33 @@ FUNC_IMPL_DISPATCH(torch::Tensor,
     }
 }
 
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_row_sum_forward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_row_sum_forward_cuda(A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    } else {
+        return csr_row_sum_forward_cpu(A_rows, A_cols,
+                                       A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_row_sum_backward,
+                   torch::Tensor grad_x,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_row_sum_backward_cuda(grad_x, A_rows, A_cols,
+                                         A_data, A_indices, A_indptr);
+    } else {
+        return csr_row_sum_backward_cpu(grad_x, A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    }
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
     m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
@@ -267,4 +294,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("csr_to_dense_forward", &csr_to_dense_forward, "CSR to dense forward");
     m.def("csr_to_dense_backward", &csr_to_dense_backward, "CSR to dense backward");
+
+    m.def("csr_row_sum_forward", &csr_row_sum_forward, "CSR row sum forward");
+    m.def("csr_row_sum_backward", &csr_row_sum_backward, "CSR row sum backward");
 }
