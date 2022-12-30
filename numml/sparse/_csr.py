@@ -4,6 +4,7 @@ import numpy as np
 import numml.utils as utils
 import importlib
 import numml.sparse.linalg as spla
+import numml.profiler
 
 # Try to import scipy and cupy for conversion routines
 class NotFoundModule:
@@ -38,6 +39,27 @@ def try_import_lazy(modname):
 sci_sp = try_import('scipy.sparse')
 cupy = try_import_lazy('cupy')
 cupy_sp = try_import_lazy('cupyx.scipy.sparse')
+
+# Profiling, for debug
+class DummyProfiler():
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self, *args, **kwargs):
+        pass
+
+    def __exit__(self, type, value, tb):
+        if type is not None:
+            raise value
+        return True
+Profiler = DummyProfiler
+
+def _debug_set_profiler_enabled(val):
+    global Profiler
+    if val:
+        Profiler = numml.profiler.Profiler
+    else:
+        Profiler = DummyProfiler
 
 
 def numpy_to_torch_dtype(np_type):
@@ -87,7 +109,8 @@ class spgemv(torch.autograd.Function):
         if A_data.type() != x.type():
             raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {x.type()}, respectively.')
 
-        Ax = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], A_data, A_col_ind, A_rowptr, x)
+        with Profiler('spgemv forward'):
+            Ax = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], A_data, A_col_ind, A_rowptr, x)
 
         ctx.save_for_backward(Ax, x, A_data, A_col_ind, A_rowptr)
         ctx.shape = A_shape
@@ -99,8 +122,9 @@ class spgemv(torch.autograd.Function):
         Ax, x, A_data, A_col_ind, A_rowptr = ctx.saved_tensors
         A_shape = ctx.shape
 
-        grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1],
-                                                         A_data, A_col_ind, A_rowptr, x)
+        with Profiler('spgemv backward'):
+            grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1],
+                                                             A_data, A_col_ind, A_rowptr, x)
 
         return (None, # A_shape
                 grad_A, # A_data
@@ -126,8 +150,9 @@ class spgemm(torch.autograd.Function):
 
         C_shape = (A_shape[0], B_shape[1])
 
-        C_data, C_indices, C_indptr = numml_torch_cpp.spgemm_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
-                                                                     B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
+        with Profiler('spgemm forward'):
+            C_data, C_indices, C_indptr = numml_torch_cpp.spgemm_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
+                                                                         B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
 
         ctx.save_for_backward(A_data, A_indices, A_indptr, B_data, B_indices, B_indptr, C_data, C_indices, C_indptr)
         ctx.A_shape = A_shape
@@ -144,9 +169,10 @@ class spgemm(torch.autograd.Function):
         B_shape = ctx.B_shape
         C_shape = ctx.C_shape
 
-        grad_A, grad_B = numml_torch_cpp.spgemm_backward(grad_C_data, C_indices, C_indptr,
-                                                         A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
-                                                         B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
+        with Profiler('spgemm backward'):
+            grad_A, grad_B = numml_torch_cpp.spgemm_backward(grad_C_data, C_indices, C_indptr,
+                                                             A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
+                                                             B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
 
         return (None, # A_shape
                 grad_A,
@@ -172,9 +198,10 @@ class splincomb(torch.autograd.Function):
         if A_data.type() != B_data.type():
             raise RuntimeError(f'Matrices should be same data type, got {A_data.type()} and {B_data.type()}, respectively.')
 
-        C_data, C_col_ind, C_rowptr = numml_torch_cpp.splincomb_forward(shape[0], shape[1],
-                                                                        alpha, A_data, A_col_ind, A_rowptr,
-                                                                        beta,  B_data, B_col_ind, B_rowptr)
+        with Profiler('splincomb forward'):
+            C_data, C_col_ind, C_rowptr = numml_torch_cpp.splincomb_forward(shape[0], shape[1],
+                                                                            alpha, A_data, A_col_ind, A_rowptr,
+                                                                            beta,  B_data, B_col_ind, B_rowptr)
 
         ctx.save_for_backward(alpha, A_data, A_col_ind, A_rowptr, beta, B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr)
         ctx.shape = shape
@@ -187,10 +214,11 @@ class splincomb(torch.autograd.Function):
         alpha, A_data, A_col_ind, A_rowptr, beta, B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr = ctx.saved_tensors
         shape = ctx.shape
 
-        grad_A, grad_B = numml_torch_cpp.splincomb_backward(shape[0], shape[1],
-                                                            alpha, A_data, A_col_ind, A_rowptr,
-                                                            beta,  B_data, B_col_ind, B_rowptr,
-                                                            grad_C_data, C_col_ind, C_rowptr)
+        with Profiler('splincomb backward'):
+            grad_A, grad_B = numml_torch_cpp.splincomb_backward(shape[0], shape[1],
+                                                                alpha, A_data, A_col_ind, A_rowptr,
+                                                                beta,  B_data, B_col_ind, B_rowptr,
+                                                                grad_C_data, C_col_ind, C_rowptr)
 
         return (None, # shape
                 torch.sum(A_data), # alpha
@@ -305,8 +333,10 @@ class triu(torch.autograd.Function):
 class sptranspose(torch.autograd.Function):
     @staticmethod
     def forward(ctx, A_shape, A_data, A_indices, A_indptr):
-        At_data, At_indices, At_indptr, At_to_A_idx = \
-            numml_torch_cpp.csr_transpose_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
+
+        with Profiler('sptranspose forward'):
+            At_data, At_indices, At_indptr, At_to_A_idx = \
+                numml_torch_cpp.csr_transpose_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
 
         ctx.save_for_backward(At_to_A_idx)
         return A_shape[::-1], At_data, At_indices, At_indptr
@@ -314,7 +344,9 @@ class sptranspose(torch.autograd.Function):
     @staticmethod
     def backward(ctx, _grad_A_shape, grad_At_data, _grad_At_indices, _grad_At_indptr):
         (At_to_A_idx,) = ctx.saved_tensors
-        grad_A = numml_torch_cpp.csr_transpose_backward(grad_At_data, At_to_A_idx)
+
+        with Profiler('sptranspose backward'):
+            grad_A = numml_torch_cpp.csr_transpose_backward(grad_At_data, At_to_A_idx)
 
         return (None, # A_shape
                 grad_A, # A_data
@@ -328,8 +360,9 @@ class spdmm(torch.autograd.Function):
         ctx.save_for_backward(A_data, A_indices, A_indptr, B)
         ctx.A_shape = A_shape
 
-        C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
-                                          A_data, A_indices, A_indptr, B)
+        with Profiler('spdmm forward'):
+            C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
+                                              A_data, A_indices, A_indptr, B)
         return C
 
     @staticmethod
@@ -337,9 +370,10 @@ class spdmm(torch.autograd.Function):
         A_data, A_indices, A_indptr, B = ctx.saved_tensors
         A_shape = ctx.A_shape
 
-        grad_A, grad_B = numml_torch_cpp.spdmm_backward(A_shape[0], A_shape[1],
-                                                        A_data, A_indices, A_indptr,
-                                                        B, grad_C)
+        with Profiler('spdmm backward'):
+            grad_A, grad_B = numml_torch_cpp.spdmm_backward(A_shape[0], A_shape[1],
+                                                            A_data, A_indices, A_indptr,
+                                                            B, grad_C)
 
         return (None, # A_shape
                 grad_A, # A_data
@@ -354,8 +388,9 @@ class sptodense(torch.autograd.Function):
         ctx.save_for_backward(A_data, A_indices, A_indptr)
         ctx.A_shape = A_shape
 
-        A_d = numml_torch_cpp.csr_to_dense_forward(A_shape[0], A_shape[1],
-                                                   A_data, A_indices, A_indptr)
+        with Profiler('to dense forward'):
+            A_d = numml_torch_cpp.csr_to_dense_forward(A_shape[0], A_shape[1],
+                                                       A_data, A_indices, A_indptr)
         return A_d
 
     @staticmethod
@@ -363,8 +398,9 @@ class sptodense(torch.autograd.Function):
         A_data, A_indices, A_indptr = ctx.saved_tensors
         A_shape = ctx.A_shape
 
-        grad_A_data = numml_torch_cpp.csr_to_dense_backward(grad_A_dense, A_shape[0], A_shape[1],
-                                                            A_data, A_indices, A_indptr)
+        with Profiler('to dense backward'):
+            grad_A_data = numml_torch_cpp.csr_to_dense_backward(grad_A_dense, A_shape[0], A_shape[1],
+                                                                A_data, A_indices, A_indptr)
 
         return (None,        # A_shape
                 grad_A_data, # A_data
@@ -378,8 +414,9 @@ class sprowsum(torch.autograd.Function):
         ctx.save_for_backward(A_data, A_indices, A_indptr)
         ctx.A_shape = A_shape
 
-        x = numml_torch_cpp.csr_row_sum_forward(A_shape[0], A_shape[1],
-                                                A_data, A_indices, A_indptr)
+        with Profiler('row sum forward'):
+            x = numml_torch_cpp.csr_row_sum_forward(A_shape[0], A_shape[1],
+                                                    A_data, A_indices, A_indptr)
         return x
 
     @staticmethod
@@ -387,8 +424,34 @@ class sprowsum(torch.autograd.Function):
         A_data, A_indices, A_indptr = ctx.saved_tensors
         A_shape = ctx.A_shape
 
-        grad_A_data = numml_torch_cpp.csr_row_sum_backward(grad_x, A_shape[0], A_shape[1],
-                                                           A_data, A_indices, A_indptr)
+        with Profiler('row sum backward'):
+            grad_A_data = numml_torch_cpp.csr_row_sum_backward(grad_x, A_shape[0], A_shape[1],
+                                                               A_data, A_indices, A_indptr)
+
+        return (None,        # A_shape
+                grad_A_data, # A_data
+                None,        # A_indices
+                None)        # A_indptr
+
+class spdiag(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr):
+        ctx.save_for_backward(A_data, A_indices, A_indptr)
+        ctx.A_shape = A_shape
+
+        with Profiler('extract diagonal forward'):
+            x = numml_torch_cpp.csr_extract_diagonal_forward(A_shape[0], A_shape[1],
+                                                             A_data, A_indices, A_indptr)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        A_data, A_indices, A_indptr = ctx.saved_tensors
+        A_shape = ctx.A_shape
+
+        with Profiler('extract diagonal backward'):
+            grad_A_data = numml_torch_cpp.csr_extract_diagonal_backward(grad_x, A_shape[0], A_shape[1],
+                                                                        A_data, A_indices, A_indptr)
 
         return (None,        # A_shape
                 grad_A_data, # A_data
@@ -885,17 +948,8 @@ class SparseCSRTensor(object):
 
         return idx
 
-    def diagonal(self, k=0):
-        max_diag = min(self.shape[0], self.shape[1])
-        D = torch.zeros(max_diag - abs(k))
-
-        for row in range(max_diag):
-            for i in range(self.indptr[row], self.indptr[row+1]):
-                col = self.indices[i].item()
-                if row == col:
-                    D[row] = self.data[i]
-
-        return D
+    def diagonal(self):
+        return spdiag.apply(self.shape, self.data, self.indices, self.indptr)
 
     def tril(self, k=0):
         L_data, L_indices, L_indptr = tril.apply(self.shape, self.data, self.indices, self.indptr, k)

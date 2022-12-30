@@ -1084,7 +1084,7 @@ FUNC_IMPL_CPU(torch::Tensor,
     torch::Tensor grad_A_data = torch::empty_like(A_data);
 
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_to_dense_backward_cpu", ([&] {
-        auto grad_A_data_acc = A_data.accessor<scalar_t, 1>();
+        auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
         const auto grad_A_d_acc = grad_Ad.accessor<scalar_t, 2>();
@@ -1146,6 +1146,65 @@ FUNC_IMPL_CPU(torch::Tensor,
         for (int64_t row = 0; row < A_rows; row++) {
             for (int64_t i = A_indptr_acc[row]; i < A_indptr_acc[row + 1]; i++) {
                 grad_A_data_acc[i] = grad_x_acc[row];
+            }
+        }
+    }));
+
+    return grad_A_data;
+}
+
+/* CSR extract diagonal entries */
+FUNC_IMPL_CPU(torch::Tensor,
+              csr_extract_diagonal_forward,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype());
+
+    torch::Tensor x = torch::zeros({A_rows}, scalar_tens_opts);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_extract_diagonal_forward_cpu", ([&] {
+        auto x_acc = x.accessor<scalar_t, 1>();
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+
+        for (int64_t row = 0; row < A_rows; row++) {
+            for (int64_t i = A_indptr_acc[row]; i < A_indptr_acc[row + 1]; i++) {
+                const int64_t col = A_indices_acc[i];
+                if (row == col) {
+                    x_acc[row] = A_data_acc[i];
+                    break;
+                }
+            }
+        }
+    }));
+
+    return x;
+}
+
+FUNC_IMPL_CPU(torch::Tensor,
+              csr_extract_diagonal_backward,
+              torch::Tensor grad_x,
+              int A_rows, int A_cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    torch::Tensor grad_A_data = torch::zeros_like(A_data);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_extract_diagonal_backward_cpu", ([&] {
+        const auto grad_x_acc = grad_x.accessor<scalar_t, 1>();
+        auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+
+        for (int64_t row = 0; row < A_rows; row++) {
+            for (int64_t i = A_indptr_acc[row]; i < A_indptr_acc[row + 1]; i++) {
+                const int64_t col = A_indices_acc[i];
+                if (row == col) {
+                    grad_A_data_acc[i] = grad_x_acc[row];
+                    break;
+                }
             }
         }
     }));

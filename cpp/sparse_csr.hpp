@@ -141,4 +141,16 @@ FUNC_DEF(torch::Tensor,
          int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
 
+/* CSR Extract diagonal */
+FUNC_DEF(torch::Tensor,
+         csr_extract_diagonal_forward,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+FUNC_DEF(torch::Tensor,
+         csr_extract_diagonal_backward,
+         torch::Tensor grad_x,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
 #endif

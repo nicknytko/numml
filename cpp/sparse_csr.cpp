@@ -270,6 +270,33 @@ FUNC_IMPL_DISPATCH(torch::Tensor,
     }
 }
 
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_extract_diagonal_forward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_extract_diagonal_forward_cuda(A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    } else {
+        return csr_extract_diagonal_forward_cpu(A_rows, A_cols,
+                                       A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_extract_diagonal_backward,
+                   torch::Tensor grad_x,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_extract_diagonal_backward_cuda(grad_x, A_rows, A_cols,
+                                         A_data, A_indices, A_indptr);
+    } else {
+        return csr_extract_diagonal_backward_cpu(grad_x, A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    }
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
     m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
@@ -297,4 +324,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("csr_row_sum_forward", &csr_row_sum_forward, "CSR row sum forward");
     m.def("csr_row_sum_backward", &csr_row_sum_backward, "CSR row sum backward");
+
+    m.def("csr_extract_diagonal_forward", &csr_extract_diagonal_forward, "CSR extract diagonal forward");
+    m.def("csr_extract_diagonal_backward", &csr_extract_diagonal_backward, "CSR extract diagonal backward");
 }

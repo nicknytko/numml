@@ -655,31 +655,49 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
         .device(A_data.device().type(), A_data.device().index());
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
+    // auto start = std::chrono::steady_clock::now();
+
     /* grad_A = (grad_C * B^T) (*) mask(A) */
-    torch::Tensor grad_A = torch::empty_like(A_data);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_backward_cuda", ([&] {
-        cuda_kernel_spdmm_backward_masked_A<scalar_t><<<(A_data.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            A_rows, A_cols,
-            tensor_acc(grad_A, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
-            tensor_acc_3(B, 2, scalar_t), tensor_acc_3(grad_C, 2, scalar_t));
-    }));
-    cuda_check_kernel_launch_err();
+    torch::Tensor grad_A;
+    if (A_data.requires_grad()) {
+        grad_A = torch::empty_like(A_data);
+        AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_backward_cuda", ([&] {
+            cuda_kernel_spdmm_backward_masked_A<scalar_t><<<(A_data.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols,
+                tensor_acc(grad_A, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
+                tensor_acc_3(B, 2, scalar_t), tensor_acc_3(grad_C, 2, scalar_t));
+        }));
+        cuda_check_kernel_launch_err();
+    }
+
+    // auto end = std::chrono::steady_clock::now();
+    // std::chrono::duration<double> diff = end - start;
+    // std::cerr << "spdmm_backward grad_A " << diff.count() << std::endl;
 
     /* grad_B = (A^T * grad_C) */
-    auto At = csr_transpose_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
-    torch::Tensor grad_B = torch::empty({A_cols, grad_C.size(1)}, scalar_tens_opts);
+    torch::Tensor grad_B;
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_backward_cuda", ([&] {
-        const dim3 blocks((A_cols + threads_per_block_2d - 1) / threads_per_block_2d,
-                          (grad_C.size(1) + threads_per_block_2d - 1) / threads_per_block_2d,
-                          1);
-        const dim3 threads(threads_per_block_2d, threads_per_block_2d, 1);
-        cuda_kernel_spdmm_forward<scalar_t><<<blocks, threads, 0, main_stream>>>(
-            A_cols, A_rows, grad_C.size(0), grad_C.size(1),
-            tensor_acc(At[0], scalar_t), tensor_acc(At[1], int64_t), tensor_acc(At[2], int64_t),
-            tensor_acc_3(grad_C, 2, scalar_t), tensor_acc_3(grad_B, 2, scalar_t));
-    }));
-    cuda_check_kernel_launch_err();
+    // start = std::chrono::steady_clock::now();
+
+    if (B.requires_grad()) {
+        grad_B = torch::empty({A_cols, grad_C.size(1)}, scalar_tens_opts);
+        auto At = csr_transpose_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
+        AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_backward_cuda", ([&] {
+            const dim3 blocks((A_cols + threads_per_block_2d - 1) / threads_per_block_2d,
+                              (grad_C.size(1) + threads_per_block_2d - 1) / threads_per_block_2d,
+                              1);
+            const dim3 threads(threads_per_block_2d, threads_per_block_2d, 1);
+            cuda_kernel_spdmm_forward<scalar_t><<<blocks, threads, 0, main_stream>>>(
+                A_cols, A_rows, grad_C.size(0), grad_C.size(1),
+                tensor_acc(At[0], scalar_t), tensor_acc(At[1], int64_t), tensor_acc(At[2], int64_t),
+                tensor_acc_3(grad_C, 2, scalar_t), tensor_acc_3(grad_B, 2, scalar_t));
+        }));
+        cuda_check_kernel_launch_err();
+    }
+
+    // end = std::chrono::steady_clock::now();
+    // diff = end - start;
+    // std::cerr << "spdmm_backward grad_A " << diff.count() << std::endl;
 
     return {grad_A, grad_B};
 }
@@ -1403,6 +1421,93 @@ FUNC_IMPL_CUDA(torch::Tensor,
 
     AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_row_sum_backward_cuda", ([&] {
         kernel_csr_row_sum_backward<<<
+            (A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc(grad_x, scalar_t), tensor_acc(grad_A_data, scalar_t),
+                tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
+    }));
+
+    return grad_A_data;
+}
+
+
+/* CSR Extract diagonal */
+template <typename scalar_t>
+__global__ void kernel_csr_extract_diagonal_forward(
+    int A_rows, int A_cols,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> x,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
+
+    const int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= A_rows) {
+        return;
+    }
+
+    scalar_t diag_val = 0.;
+    for (int64_t row_i = A_indptr[row]; row_i < A_indptr[row + 1]; row_i++) {
+        const int64_t col = A_indices[row_i];
+        if (row == col) {
+            diag_val = A_data[row_i];
+        }
+    }
+    x[row] = diag_val;
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+               csr_extract_diagonal_forward,
+               int A_rows, int A_cols,
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype())
+        .device(A_data.device().type(), A_data.device().index());
+
+    torch::Tensor x = torch::empty({A_rows}, scalar_tens_opts);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_extract_diagonal_forward_cuda", ([&] {
+        kernel_csr_extract_diagonal_forward<<<
+            (A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc(x, scalar_t), tensor_acc(A_data, scalar_t),
+                tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));
+    }));
+
+    return x;
+}
+
+template <typename scalar_t>
+__global__ void kernel_csr_extract_diagonal_backward(
+    int A_rows, int A_cols,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_x,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
+
+    const int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= A_rows) {
+        return;
+    }
+
+    const scalar_t grad_row = grad_x[row];
+    for (int64_t row_i = A_indptr[row]; row_i < A_indptr[row + 1]; row_i++) {
+        const int64_t col = A_indices[row_i];
+        const scalar_t val = (row == col) ? grad_row : 0.;
+        grad_A_data[row_i] = grad_row;
+    }
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+               csr_extract_diagonal_backward,
+               torch::Tensor grad_x,
+               int A_rows, int A_cols,
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    torch::Tensor grad_A_data = torch::empty_like(A_data);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_extract_diagonal_backward_cuda", ([&] {
+        kernel_csr_extract_diagonal_backward<<<
             (A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
                 A_rows, A_cols, tensor_acc(grad_x, scalar_t), tensor_acc(grad_A_data, scalar_t),
                 tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t));

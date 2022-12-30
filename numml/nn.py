@@ -1,6 +1,7 @@
 import torch
 import torch.nn
 import numml.sparse as sp
+from numml.profiler import Profiler
 
 
 class GCNConv(torch.nn.Module):
@@ -54,7 +55,43 @@ class GCNConv(torch.nn.Module):
             X = X.unsqueeze(1)
 
         if self.normalize:
-            D = (A.row_sum() + 1.) ** -0.5
+            with Profiler('Computation of D'):
+                D = (A.row_sum() + 1.) ** -0.5
+            with Profiler('XTheta'):
+                XTheta = X @ self.weights
+            with Profiler('XDTheta'):
+                XDTheta = (D[:, None] * XTheta)
+            with Profiler('Xprime'):
+                Xprime = D[:, None] * (A @ XDTheta + XDTheta)
+        else:
+            Xprime = A @ (X @ self.weights)
+
+        return Xprime + self.bias
+
+    def forward_dense(self, A, X):
+        '''
+        Performs a forward pass.
+
+        Parameters
+        ----------
+        A : numml.sparse.SparseCSRTensor or numml.sparse.LinearOperator
+          Input "graph"
+        X : torch.Tensor
+          Node features to convolve
+
+        Returns
+        -------
+        Y : torch.Tensor
+          Output convolved node features
+        '''
+
+        if len(X.shape) == 1:
+            X = X.unsqueeze(1)
+        A = A.to_dense()
+
+        if self.normalize:
+            row_sum = A.sum(dim=1)
+            D = (row_sum + 1.) ** -0.5
             XTheta = X @ self.weights
             XDTheta = (D[:, None] * XTheta)
             Xprime = D[:, None] * (A @ XDTheta + XDTheta)
