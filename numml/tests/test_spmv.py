@@ -102,6 +102,6 @@ def test_backward_grad_x():
         ((AL@x) * rand_mult).sum().backward()
         ((AL_c@x_c) * rand_mult_c).sum().backward()
 
-        print(x.grad, x_c.grad.cpu())
+        print(x.grad, x_c.grad.cpu(), tla.norm(x.grad - x_c.grad.cpu()))
         assert(torch.allclose(x.grad, x_c.grad.cpu()))
         assert(relerr(AL@rand_mult, x.grad) < 1e-7) # abuse the fact that A=A^T so we can get away with regular spmv

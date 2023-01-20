@@ -3,6 +3,8 @@ import numml_torch_cpp
 import numpy as np
 import numml.utils as utils
 import importlib
+import numml.sparse.linalg as spla
+import numml.profiler
 
 # Try to import scipy and cupy for conversion routines
 class NotFoundModule:
@@ -10,6 +12,7 @@ class NotFoundModule:
         self.modname = modname
     def __getattr__(self, key):
         raise RuntimeError(f'Cannot get field {key}, {self.modname} is not installed or not available for import on this system.')
+
 
 class LazyImportModule:
     def __init__(self, modname):
@@ -21,18 +24,56 @@ class LazyImportModule:
             self.module = importlib.import_module(self.modname)
         return getattr(self.module, key)
 
+
 def try_import(modname):
     try:
         return importlib.import_module(modname)
     except ImportError:
         return NotFoundModule(modname)
 
+
 def try_import_lazy(modname):
     return LazyImportModule(modname)
+
 
 sci_sp = try_import('scipy.sparse')
 cupy = try_import_lazy('cupy')
 cupy_sp = try_import_lazy('cupyx.scipy.sparse')
+
+# Profiling, for debug
+class DummyProfiler():
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self, *args, **kwargs):
+        pass
+
+    def __exit__(self, type, value, tb):
+        if type is not None:
+            raise value
+        return True
+Profiler = DummyProfiler
+
+def _debug_set_profiler_enabled(val):
+    global Profiler
+    if val:
+        Profiler = numml.profiler.Profiler
+    else:
+        Profiler = DummyProfiler
+
+
+def numpy_to_torch_dtype(np_type):
+    if np_type == np.int32:
+        return torch.int32
+    elif np_type == np.int64:
+        return torch.int64
+    elif np_type == np.float32:
+        return torch.float32
+    elif np_type == np.float64:
+        return torch.float64
+    else:
+        raise RuntimeError(f'Unknown numpy type for conversion: {np_type}.')
+
 
 def coo_to_csr(values, row_ind, col_ind, shape, sort=True):
     '''
@@ -68,7 +109,8 @@ class spgemv(torch.autograd.Function):
         if A_data.type() != x.type():
             raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {x.type()}, respectively.')
 
-        Ax = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], A_data, A_col_ind, A_rowptr, x)
+        with Profiler('spgemv forward'):
+            Ax = numml_torch_cpp.spgemv_forward(A_shape[0], A_shape[1], A_data, A_col_ind, A_rowptr, x)
 
         ctx.save_for_backward(Ax, x, A_data, A_col_ind, A_rowptr)
         ctx.shape = A_shape
@@ -80,8 +122,9 @@ class spgemv(torch.autograd.Function):
         Ax, x, A_data, A_col_ind, A_rowptr = ctx.saved_tensors
         A_shape = ctx.shape
 
-        grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1],
-                                                         A_data, A_col_ind, A_rowptr, x)
+        with Profiler('spgemv backward'):
+            grad_A, grad_x = numml_torch_cpp.spgemv_backward(df_dz, A_shape[0], A_shape[1],
+                                                             A_data, A_col_ind, A_rowptr, x)
 
         return (None, # A_shape
                 grad_A, # A_data
@@ -107,8 +150,9 @@ class spgemm(torch.autograd.Function):
 
         C_shape = (A_shape[0], B_shape[1])
 
-        C_data, C_indices, C_indptr = numml_torch_cpp.spgemm_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
-                                                                     B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
+        with Profiler('spgemm forward'):
+            C_data, C_indices, C_indptr = numml_torch_cpp.spgemm_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
+                                                                         B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
 
         ctx.save_for_backward(A_data, A_indices, A_indptr, B_data, B_indices, B_indptr, C_data, C_indices, C_indptr)
         ctx.A_shape = A_shape
@@ -125,9 +169,10 @@ class spgemm(torch.autograd.Function):
         B_shape = ctx.B_shape
         C_shape = ctx.C_shape
 
-        grad_A, grad_B = numml_torch_cpp.spgemm_backward(grad_C_data, C_indices, C_indptr,
-                                                         A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
-                                                         B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
+        with Profiler('spgemm backward'):
+            grad_A, grad_B = numml_torch_cpp.spgemm_backward(grad_C_data, C_indices, C_indptr,
+                                                             A_shape[0], A_shape[1], A_data, A_indices, A_indptr,
+                                                             B_shape[0], B_shape[1], B_data, B_indices, B_indptr)
 
         return (None, # A_shape
                 grad_A,
@@ -137,45 +182,6 @@ class spgemm(torch.autograd.Function):
                 grad_B,
                 None, # B_indices
                 None) # B_indptr
-
-
-class sptrsv(torch.autograd.Function):
-    '''
-    Sparse triangular solve with single right-hand-side.
-    '''
-
-    @staticmethod
-    def forward(ctx, shape, A_data, A_indices, A_indptr, lower, unit, b):
-        if shape[0] != shape[1]:
-            raise RuntimeError(f'Expected square matrix for triangular solve, got {shape[0]} x {shape[1]}.')
-        if A_data.type() != b.type():
-            raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {b.type()}, respectively.')
-
-        x = numml_torch_cpp.sptrsv_forward(shape[0], shape[1], A_data, A_indices, A_indptr, lower, unit, b)
-        ctx.save_for_backward(A_data, A_indices, A_indptr, b, x)
-        ctx.lower = lower
-        ctx.unit = unit
-        ctx.shape = shape
-
-        return x
-
-    @staticmethod
-    def backward(ctx, grad_x):
-        A_data, A_indices, A_indptr, b, x = ctx.saved_tensors
-        lower = ctx.lower
-        unit = ctx.unit
-        shape = ctx.shape
-
-        grad_A_data, grad_b = numml_torch_cpp.sptrsv_backward(grad_x, x, shape[0], shape[1],
-                                                              A_data, A_indices, A_indptr, lower, unit, b)
-
-        return (None, # shape
-                grad_A_data, # A_data
-                None, # A_indices
-                None, # A_indptr
-                None, # lower
-                None, # unit
-                grad_b) # b
 
 
 class splincomb(torch.autograd.Function):
@@ -192,9 +198,10 @@ class splincomb(torch.autograd.Function):
         if A_data.type() != B_data.type():
             raise RuntimeError(f'Matrices should be same data type, got {A_data.type()} and {B_data.type()}, respectively.')
 
-        C_data, C_col_ind, C_rowptr = numml_torch_cpp.splincomb_forward(shape[0], shape[1],
-                                                                        alpha, A_data, A_col_ind, A_rowptr,
-                                                                        beta,  B_data, B_col_ind, B_rowptr)
+        with Profiler('splincomb forward'):
+            C_data, C_col_ind, C_rowptr = numml_torch_cpp.splincomb_forward(shape[0], shape[1],
+                                                                            alpha, A_data, A_col_ind, A_rowptr,
+                                                                            beta,  B_data, B_col_ind, B_rowptr)
 
         ctx.save_for_backward(alpha, A_data, A_col_ind, A_rowptr, beta, B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr)
         ctx.shape = shape
@@ -207,10 +214,11 @@ class splincomb(torch.autograd.Function):
         alpha, A_data, A_col_ind, A_rowptr, beta, B_data, B_col_ind, B_rowptr, C_data, C_col_ind, C_rowptr = ctx.saved_tensors
         shape = ctx.shape
 
-        grad_A, grad_B = numml_torch_cpp.splincomb_backward(shape[0], shape[1],
-                                                            alpha, A_data, A_col_ind, A_rowptr,
-                                                            beta,  B_data, B_col_ind, B_rowptr,
-                                                            grad_C_data, C_col_ind, C_rowptr)
+        with Profiler('splincomb backward'):
+            grad_A, grad_B = numml_torch_cpp.splincomb_backward(shape[0], shape[1],
+                                                                alpha, A_data, A_col_ind, A_rowptr,
+                                                                beta,  B_data, B_col_ind, B_rowptr,
+                                                                grad_C_data, C_col_ind, C_rowptr)
 
         return (None, # shape
                 torch.sum(A_data), # alpha
@@ -222,74 +230,6 @@ class splincomb(torch.autograd.Function):
                 None, # B_col_ind
                 None) # B_rowptr
 
-
-def eye(N, k=0):
-    assert(abs(k) < N)
-
-    N_k = N - abs(k)
-    rows = None
-    cols = None
-    vals = torch.ones(N_k)
-
-    if k == 0:
-        rows = torch.arange(N)
-        cols = torch.arange(N)
-    elif k > 0:
-        rows = torch.arange(N_k)
-        cols = torch.arange(k, N)
-    else:
-        rows = torch.arange(abs(k), N)
-        cols = torch.arange(N_k)
-
-    return SparseCSRTensor((vals, (rows, cols)), shape=(N, N))
-
-
-def diag(x, k=0):
-    N_k = len(x)
-    N = N_k + abs(k)
-    rows = None
-    cols = None
-
-    if k == 0:
-        rows = torch.arange(N)
-        cols = torch.arange(N)
-    elif k > 0:
-        rows = torch.arange(N_k)
-        cols = torch.arange(k, N)
-    else:
-        rows = torch.arange(abs(k), N)
-        cols = torch.arange(N_k)
-
-    return SparseCSRTensor((x, (rows, cols)), shape=(N, N))
-
-def spouter(x, y):
-    '''
-    Returns the outer product of two vectors as a sparse matrix.
-    Note that this is only beneficial if x and y are themselves reasonably sparse, otherwise
-    it is likely better to use the regular dense outer product.
-
-    Parameters
-    ----------
-    x : torch.Tensor
-      First term in outer product
-    y : torch.Tensor
-      Second term in outer product
-
-    Returns
-    -------
-    xyT : SparseCSRTensor
-      The product x * y^T as a sparse tensor.
-    '''
-
-    x_nz = torch.nonzero(x).flatten()
-    y_nz = torch.nonzero(y).flatten()
-
-    row, col = torch.meshgrid(x_nz, y_nz, indexing='ij')
-    row = row.flatten()
-    col = col.flatten()
-
-    val = x[row] * y[col]
-    return SparseCSRTensor((val, (row, col)), shape=(len(x), len(y)))
 
 class tril(torch.autograd.Function):
     @staticmethod
@@ -389,138 +329,14 @@ class triu(torch.autograd.Function):
                 None, # A_rowptr
                 None) # k
 
-class spcolscale(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, shape,
-                A_data, A_col_ind, A_rowptr,
-                row_start, column):
-        B_data = torch.clone(A_data.detach())
-
-        diag_entry = None
-        for i in range(A_rowptr[row_start], A_rowptr[row_start + 1]):
-            if A_col_ind[i] == row_start:
-                diag_entry = A_data[i]
-                break
-
-        if diag_entry is None:
-            raise RuntimeError('Matrix has no explicit diagonal entry!')
-        if diag_entry == 0.:
-            raise RuntimeError('Division by zero: matrix has explicit zero on diagonal.')
-
-        B_data[torch.logical_and(A_col_ind == column, torch.arange(len(A_data), device=A_data.device) >= A_rowptr[row_start+1])] /= diag_entry
-
-        ctx.save_for_backward(A_data, A_col_ind, A_rowptr)
-        ctx.row_start = row_start
-        ctx.column = column
-        ctx.shape = shape
-
-        return B_data, A_col_ind, A_rowptr
-
-    @staticmethod
-    def backward(ctx, grad_B_data, _grad_B_col_ind, _grad_B_rowptr):
-        A_data, A_col_ind, A_rowptr = ctx.saved_tensors
-        row_start = ctx.row_start
-        column = ctx.column
-        shape = ctx.shape
-
-        grad_A = torch.clone(grad_B_data)
-        kk_entry = None
-        for row in range(row_start, shape[0]):
-            for i in range(A_rowptr[row], A_rowptr[row + 1]):
-                col = A_col_ind[i]
-
-                if col == column:
-                    if row == row_start:
-                        kk_entry = i
-                    else:
-                        grad_A[i] /= A_data[kk_entry]
-                        grad_A[kk_entry] -= grad_B_data[i] * (A_data[i] / (A_data[kk_entry]) ** 2.)
-                    break
-
-        return (None,   # shape
-                grad_A, # A_data
-                None,   # A_col_ind
-                None,   # A_rowptr
-                None,   # row_start
-                None)   # column
-
-def splu(A):
-    '''
-    Sparse LU factorization *without* pivoting
-
-    Parameters
-    ----------
-    A : SparseCSRTensor
-      Sparse tensor on which to perform the LU factorization
-
-    Returns
-    -------
-    M : SparseCSRTensor
-      Sparse tensor M in which entries below the main diagonal correspond
-      to 'L', while entries including and above the main diagonal correspond
-      to 'U'
-    '''
-
-    # Helper to do the column scaling
-    def apply_spcolscale(A, k):
-        B_data, B_indices, B_indptr = spcolscale.apply(A.shape, A.data, A.indices, A.indptr, k, k)
-        return SparseCSRTensor((B_data, B_indices, B_indptr), shape=A.shape)
-
-    M = A.copy()
-    for k in range(A.shape[0] - 1):
-        M = apply_spcolscale(M, k)
-        M_row = torch.zeros(A.shape[1])
-        M_col = torch.zeros(A.shape[0])
-
-        # Get row of M
-        for i in range(M.indptr[k], M.indptr[k+1]):
-            col = M.indices[i]
-            if col > k:
-                M_row[col] = M.data[i]
-
-        # Get col of M
-        for row in range(k+1, M.shape[0]):
-            for i in range(M.indptr[row], M.indptr[row + 1]):
-                col = M.indices[i]
-                if col == k:
-                    M_col[row] = M.data[i]
-                    break
-
-        M = M - spouter(M_col, M_row)
-    return M
-
-
-def splu_solve(LU, b):
-    y = LU.solve_triangular(upper=False, unit=True, b=b)
-    return LU.solve_triangular(upper=True, unit=False, b=y)
-
-
-def spsolve(A, b):
-    '''
-    Solves a sparse system of linear equations for a vector right-hand-side.
-
-    Parameters
-    ----------
-    A : SparseCSRTensor
-      Sparse, square tensor encoding some system of equations.
-    b : torch.Tensor
-      Dense right-hand-side vector.
-
-    Returns
-    -------
-    x : torch.Tensor
-      The solution to A^{-1} b
-    '''
-
-    LU = splu(A)
-    return splu_solve(LU, b)
-
 
 class sptranspose(torch.autograd.Function):
     @staticmethod
     def forward(ctx, A_shape, A_data, A_indices, A_indptr):
-        At_data, At_indices, At_indptr, At_to_A_idx = \
-            numml_torch_cpp.csr_transpose_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
+
+        with Profiler('sptranspose forward'):
+            At_data, At_indices, At_indptr, At_to_A_idx = \
+                numml_torch_cpp.csr_transpose_forward(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
 
         ctx.save_for_backward(At_to_A_idx)
         return A_shape[::-1], At_data, At_indices, At_indptr
@@ -528,7 +344,9 @@ class sptranspose(torch.autograd.Function):
     @staticmethod
     def backward(ctx, _grad_A_shape, grad_At_data, _grad_At_indices, _grad_At_indptr):
         (At_to_A_idx,) = ctx.saved_tensors
-        grad_A = numml_torch_cpp.csr_transpose_backward(grad_At_data, At_to_A_idx)
+
+        with Profiler('sptranspose backward'):
+            grad_A = numml_torch_cpp.csr_transpose_backward(grad_At_data, At_to_A_idx)
 
         return (None, # A_shape
                 grad_A, # A_data
@@ -542,9 +360,9 @@ class spdmm(torch.autograd.Function):
         ctx.save_for_backward(A_data, A_indices, A_indptr, B)
         ctx.A_shape = A_shape
 
-        C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
-                                          A_data, A_indices, A_indptr, B)
-
+        with Profiler('spdmm forward'):
+            C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
+                                              A_data, A_indices, A_indptr, B)
         return C
 
     @staticmethod
@@ -552,15 +370,166 @@ class spdmm(torch.autograd.Function):
         A_data, A_indices, A_indptr, B = ctx.saved_tensors
         A_shape = ctx.A_shape
 
-        grad_A, grad_B = numml_torch_cpp.spdmm_backward(A_shape[0], A_shape[1],
-                                                        A_data, A_indices, A_indptr,
-                                                        B, grad_C)
+        with Profiler('spdmm backward'):
+            grad_A, grad_B = numml_torch_cpp.spdmm_backward(A_shape[0], A_shape[1],
+                                                            A_data, A_indices, A_indptr,
+                                                            B, grad_C)
 
         return (None, # A_shape
                 grad_A, # A_data
                 None, # A_indices
                 None, # A_indptr
                 grad_B) # B
+
+
+class sptodense(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr):
+        ctx.save_for_backward(A_data, A_indices, A_indptr)
+        ctx.A_shape = A_shape
+
+        with Profiler('to dense forward'):
+            A_d = numml_torch_cpp.csr_to_dense_forward(A_shape[0], A_shape[1],
+                                                       A_data, A_indices, A_indptr)
+        return A_d
+
+    @staticmethod
+    def backward(ctx, grad_A_dense):
+        A_data, A_indices, A_indptr = ctx.saved_tensors
+        A_shape = ctx.A_shape
+
+        with Profiler('to dense backward'):
+            grad_A_data = numml_torch_cpp.csr_to_dense_backward(grad_A_dense, A_shape[0], A_shape[1],
+                                                                A_data, A_indices, A_indptr)
+
+        return (None,        # A_shape
+                grad_A_data, # A_data
+                None,        # A_indices
+                None)        # A_indptr
+
+
+class sprowsum(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr):
+        ctx.save_for_backward(A_data, A_indices, A_indptr)
+        ctx.A_shape = A_shape
+
+        with Profiler('row sum forward'):
+            x = numml_torch_cpp.csr_row_sum_forward(A_shape[0], A_shape[1],
+                                                    A_data, A_indices, A_indptr)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        A_data, A_indices, A_indptr = ctx.saved_tensors
+        A_shape = ctx.A_shape
+
+        with Profiler('row sum backward'):
+            grad_A_data = numml_torch_cpp.csr_row_sum_backward(grad_x, A_shape[0], A_shape[1],
+                                                               A_data, A_indices, A_indptr)
+
+        return (None,        # A_shape
+                grad_A_data, # A_data
+                None,        # A_indices
+                None)        # A_indptr
+
+class spdiag(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr):
+        ctx.save_for_backward(A_data, A_indices, A_indptr)
+        ctx.A_shape = A_shape
+
+        with Profiler('extract diagonal forward'):
+            x = numml_torch_cpp.csr_extract_diagonal_forward(A_shape[0], A_shape[1],
+                                                             A_data, A_indices, A_indptr)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        A_data, A_indices, A_indptr = ctx.saved_tensors
+        A_shape = ctx.A_shape
+
+        with Profiler('extract diagonal backward'):
+            grad_A_data = numml_torch_cpp.csr_extract_diagonal_backward(grad_x, A_shape[0], A_shape[1],
+                                                                        A_data, A_indices, A_indptr)
+
+        return (None,        # A_shape
+                grad_A_data, # A_data
+                None,        # A_indices
+                None)        # A_indptr
+
+
+def eye(N, k=0, dtype=torch.float32, device='cpu'):
+    assert(abs(k) < N)
+
+    N_k = N - abs(k)
+    rows = None
+    cols = None
+    vals = torch.ones(N_k, dtype=dtype, device=device)
+
+    if k == 0:
+        rows = torch.arange(N, device=device)
+        cols = torch.arange(N, device=device)
+    elif k > 0:
+        rows = torch.arange(N_k, device=device)
+        cols = torch.arange(k, N, device=device)
+    else:
+        rows = torch.arange(abs(k), N, device=device)
+        cols = torch.arange(N_k, device=device)
+
+    return SparseCSRTensor((vals, (rows, cols)), shape=(N, N), dtype=dtype, device=device)
+
+
+def diag(x, k=0):
+    N_k = len(x)
+    N = N_k + abs(k)
+    rows = None
+    cols = None
+
+    device = x.device
+    dtype = x.dtype
+
+    if k == 0:
+        rows = torch.arange(N, device=device)
+        cols = torch.arange(N, device=device)
+    elif k > 0:
+        rows = torch.arange(N_k, device=device)
+        cols = torch.arange(k, N, device=device)
+    else:
+        rows = torch.arange(abs(k), N, device=device)
+        cols = torch.arange(N_k, device=device)
+
+    return SparseCSRTensor((x, (rows, cols)), shape=(N, N), dtype=x.dtype, device=device)
+
+
+def spouter(x, y):
+    '''
+    Returns the outer product of two vectors as a sparse matrix.
+    Note that this is only beneficial if x and y are themselves reasonably sparse, otherwise
+    it is likely better to use the regular dense outer product.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+      First term in outer product
+    y : torch.Tensor
+      Second term in outer product
+
+    Returns
+    -------
+    xyT : SparseCSRTensor
+      The product x * y^T as a sparse tensor.
+    '''
+
+    x_nz = torch.nonzero(x).flatten()
+    y_nz = torch.nonzero(y).flatten()
+
+    row, col = torch.meshgrid(x_nz, y_nz, indexing='ij')
+    row = row.flatten()
+    col = col.flatten()
+
+    val = x[row] * y[col]
+    return SparseCSRTensor((val, (row, col)), shape=(len(x), len(y)))
 
 
 def unpack_csr(A):
@@ -572,7 +541,7 @@ def repack_csr(A_data, A_indices, A_indptr, A_shape):
 
 
 class SparseCSRTensor(object):
-    def __init__(self, arg1, shape=None, clone=True):
+    def __init__(self, arg1, shape=None, clone=True, dtype=None, device=None):
         '''
         Compressed Sparse Row matrix (tensor) with gradient support on
         nonzero entries.
@@ -615,9 +584,14 @@ class SparseCSRTensor(object):
                 self.shape = arg1.shape
         elif isinstance(arg1, sci_sp.spmatrix):
             arg_csr = arg1.tocsr()
-            self.data = torch.Tensor(arg_csr.data.copy())
-            self.indices = torch.Tensor(arg_csr.indices.copy()).long()
-            self.indptr = torch.Tensor(arg_csr.indptr.copy()).long()
+            if dtype is None:
+                dtype = numpy_to_torch_dtype(arg_csr.data.dtype)
+            if device is None:
+                device = torch.device('cpu')
+
+            self.data = torch.Tensor(arg_csr.data.copy()).type(dtype).to(device)
+            self.indices = torch.Tensor(arg_csr.indices.copy()).long().to(device)
+            self.indptr = torch.Tensor(arg_csr.indptr.copy()).long().to(device)
             self.shape = arg_csr.shape
         elif isinstance(arg1, tuple):
             if len(arg1) == 3:
@@ -625,26 +599,36 @@ class SparseCSRTensor(object):
                 assert(shape is not None)
 
                 if isinstance(arg1[0], np.ndarray):
-                    self.data = torch.Tensor(arg1[0].copy())
+                    if dtype is None:
+                        dtype = numpy_to_torch_dtype(arg_csr.data.dtype)
+                    if device is None:
+                        device = torch.device('cpu')
+
+                    self.data = torch.Tensor(arg1[0].copy()).type(dtype).to(device)
                 elif isinstance(arg1[1], torch.Tensor):
+                    if dtype is None:
+                        dtype = arg1[0].dtype
+                    if device is None:
+                        device = arg1[0].device
+
                     if clone:
-                        self.data = torch.clone(arg1[0])
+                        self.data = torch.clone(arg1[0]).type(dtype).to(device)
                     else:
                         self.data = arg1[0]
 
                 if isinstance(arg1[1], np.ndarray):
-                    self.indices = torch.Tensor(arg1[1].copy()).long()
+                    self.indices = torch.Tensor(arg1[1].copy()).long().to(device)
                 elif isinstance(arg1[1], torch.Tensor):
                     if clone:
-                        self.indices = torch.clone(arg1[1]).long()
+                        self.indices = torch.clone(arg1[1]).long().to(device)
                     else:
                         self.indices = arg1[1]
 
                 if isinstance(arg1[2], np.ndarray):
-                    self.indptr = torch.Tensor(arg1[2].copy()).long()
+                    self.indptr = torch.Tensor(arg1[2].copy()).long().to(device)
                 elif isinstance(arg1[2], torch.Tensor):
                     if clone:
-                        self.indptr = torch.clone(arg1[2]).long()
+                        self.indptr = torch.clone(arg1[2]).long().to(device)
                     else:
                         self.indptr = arg1[2]
 
@@ -684,7 +668,7 @@ class SparseCSRTensor(object):
           Solution to the matrix equation Ax = b, where A is triangular.
         '''
 
-        return sptrsv.apply(self.shape, self.data, self.indices, self.indptr, not upper, unit, b)
+        return spla.sptrsv.apply(self.shape, self.data, self.indices, self.indptr, not upper, unit, b)
 
     def spspmm(self, othr):
         assert(self.shape[1] == othr.shape[0])
@@ -727,11 +711,7 @@ class SparseCSRTensor(object):
           Dense output
         '''
 
-        X = torch.zeros(self.shape, device=self.data.device, dtype=self.data.dtype)
-        for row_i in range(len(self.indptr) - 1):
-            for data_j in range(self.indptr[row_i], self.indptr[row_i + 1]):
-                X[row_i, self.indices[data_j]] = self.data[data_j]
-        return X
+        return sptodense.apply(self.shape, self.data, self.indices, self.indptr)
 
     def to_coo(self):
         '''
@@ -815,10 +795,7 @@ class SparseCSRTensor(object):
           Tensor such that row_sum[i] is the sum of entries in row i
         '''
 
-        rs = torch.empty(self.shape[1], dtype=self.data.dtype, device=self.device)
-        for i in range(self.shape[0]):
-            rs[i] = torch.sum(self.data[self.indptr[i] : self.indptr[i+1]])
-        return rs
+        return sprowsum.apply(self.shape, self.data, self.indices, self.indptr)
 
     def abs(self):
         '''
@@ -971,17 +948,8 @@ class SparseCSRTensor(object):
 
         return idx
 
-    def diagonal(self, k=0):
-        max_diag = min(self.shape[0], self.shape[1])
-        D = torch.zeros(max_diag - abs(k))
-
-        for row in range(max_diag):
-            for i in range(self.indptr[row], self.indptr[row+1]):
-                col = self.indices[i].item()
-                if row == col:
-                    D[row] = self.data[i]
-
-        return D
+    def diagonal(self):
+        return spdiag.apply(self.shape, self.data, self.indices, self.indptr)
 
     def tril(self, k=0):
         L_data, L_indices, L_indptr = tril.apply(self.shape, self.data, self.indices, self.indptr, k)
@@ -1029,30 +997,3 @@ class SparseCSRTensor(object):
 
     def double(self):
         return SparseCSRTensor((self.data.double(), self.indices, self.indptr), self.shape)
-
-
-class LinearOperator(object):
-    def __init__(self, shape, rm=None, lm=None):
-        '''
-        Defines a wrapper operator class for some object that performs the
-        matrix-vector product A times x and/or x times A.
-
-        Parameters
-        ----------
-        shape : tuple
-          Shape of the underlying operator
-        rm : callable
-          Function that takes torch Tensor x and returns A x
-        lm : callable
-          Function that takes torch Tensor x and returns x^T A
-        '''
-
-        self.shape = shape
-        self.right_multiply = rm
-        self.left_multiply = lm
-
-    def __matmul__(self, x):
-        return self.right_multiply(x)
-
-    def __rmatmul__(self, x):
-        return self.left_multiply(x)

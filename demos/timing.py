@@ -598,6 +598,30 @@ def test_dtrsv(results):
     results.add(TestResultsMidrule())
 tests['dtrsv'] = test_dtrsv
 
+def test_spsolve():
+    N = 64
+    A = sp.eye(N) * 2 - sp.eye(N, k=-1) - sp.eye(N, k=1)
+    A_c = A.to(gpu)
+    x = torch.ones(N)
+    x_c = x.to(gpu)
+
+    it = 1
+    #fwd_cpu_t = time_op(lambda: sp.spsolve(A, x), it)
+    fwd_cpu_t = 0.
+    fwd_gpu_t = time_op(lambda: sp.spsolve(A_c, x_c), it)
+    print_results('SP Direct Solve Forward', fwd_cpu_t, fwd_gpu_t, it, N)
+
+    A.requires_grad = True
+    A_c.requires_grad = True
+
+    it = 1
+    #bwd_cpu_t = time_op(lambda: sp.spsolve(A, x).sum().backward(), it)
+    bwd_cpu_t = 0.
+    bwd_gpu_t = time_op(lambda: sp.spsolve(A_c, x_c).sum().backward(), it)
+    print_results('SP Direct Solve Backward', bwd_cpu_t, bwd_gpu_t, it, N)
+tests['spsolve'] = test_spsolve
+
+
 ### Arg checks
 
 results = TestResults({

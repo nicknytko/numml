@@ -186,6 +186,117 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
     }
 }
 
+FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+                   splu,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    if (is_cuda(A_data)) {
+        return splu_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
+    } else {
+        return splu_cpu(A_rows, A_cols, A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+                   spsolve_backward,
+                   torch::Tensor grad_x, torch::Tensor x,
+                   int A_rows, int A_cols,
+                   torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    if (is_cuda(A_data)) {
+        return spsolve_backward_cuda(grad_x, x, A_rows, A_cols,
+                                     Mt_data, Mt_indices, Mt_indptr,
+                                     A_data, A_indices, A_indptr);
+    } else {
+        return spsolve_backward_cpu(grad_x, x, A_rows, A_cols,
+                                    Mt_data, Mt_indices, Mt_indptr,
+                                    A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_to_dense_forward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_to_dense_forward_cuda(A_rows, A_cols,
+                                         A_data, A_indices, A_indptr);
+    } else {
+        return csr_to_dense_forward_cpu(A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_to_dense_backward,
+                   torch::Tensor grad_Ad,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_to_dense_backward_cuda(grad_Ad, A_rows, A_cols,
+                                          A_data, A_indices, A_indptr);
+    } else {
+        return csr_to_dense_backward_cpu(grad_Ad, A_rows, A_cols,
+                                         A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_row_sum_forward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_row_sum_forward_cuda(A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    } else {
+        return csr_row_sum_forward_cpu(A_rows, A_cols,
+                                       A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_row_sum_backward,
+                   torch::Tensor grad_x,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_row_sum_backward_cuda(grad_x, A_rows, A_cols,
+                                         A_data, A_indices, A_indptr);
+    } else {
+        return csr_row_sum_backward_cpu(grad_x, A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_extract_diagonal_forward,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_extract_diagonal_forward_cuda(A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    } else {
+        return csr_extract_diagonal_forward_cpu(A_rows, A_cols,
+                                       A_data, A_indices, A_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   csr_extract_diagonal_backward,
+                   torch::Tensor grad_x,
+                   int A_rows, int A_cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+    if (is_cuda(A_data)) {
+        return csr_extract_diagonal_backward_cuda(grad_x, A_rows, A_cols,
+                                         A_data, A_indices, A_indptr);
+    } else {
+        return csr_extract_diagonal_backward_cpu(grad_x, A_rows, A_cols,
+                                        A_data, A_indices, A_indptr);
+    }
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
     m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
@@ -202,6 +313,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("spdmm_forward", &spdmm_forward, "Sparse times dense matrix forward");
     m.def("spdmm_backward", &spdmm_backward, "Sparse times dense matrix backward");
 
-    m.def("sptrsv_forward", &sptrsv_forward, "Sparse triangular solve");
-    m.def("sptrsv_backward", &sptrsv_backward, "Sparse times dense matrix backward");
+    m.def("sptrsv_forward", &sptrsv_forward, "Sparse triangular solve forward");
+    m.def("sptrsv_backward", &sptrsv_backward, "Sparse triangular solve backward");
+
+    m.def("splu", &splu, "Sparse LU decomposition");
+    m.def("spsolve_backward", &spsolve_backward, "Sparse LU solve backward");
+
+    m.def("csr_to_dense_forward", &csr_to_dense_forward, "CSR to dense forward");
+    m.def("csr_to_dense_backward", &csr_to_dense_backward, "CSR to dense backward");
+
+    m.def("csr_row_sum_forward", &csr_row_sum_forward, "CSR row sum forward");
+    m.def("csr_row_sum_backward", &csr_row_sum_backward, "CSR row sum backward");
+
+    m.def("csr_extract_diagonal_forward", &csr_extract_diagonal_forward, "CSR extract diagonal forward");
+    m.def("csr_extract_diagonal_backward", &csr_extract_diagonal_backward, "CSR extract diagonal backward");
 }

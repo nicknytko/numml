@@ -1,5 +1,5 @@
-#ifndef SPARSE_CSR_H_
-#define SPARSE_CSR_H_
+#ifndef SPARSE_CSR_HPP_
+#define SPARSE_CSR_HPP_
 
 #include <torch/extension.h>
 #include <vector>
@@ -103,5 +103,54 @@ FUNC_DEF(std::vector<torch::Tensor>,
          int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
          bool lower, bool unit, torch::Tensor b);
+
+/* LU Factorization */
+FUNC_DEF(std::vector<torch::Tensor>,
+         splu,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+FUNC_DEF(std::vector<torch::Tensor>,
+         spsolve_backward,
+         torch::Tensor grad_x, torch::Tensor x,
+         int A_rows, int A_cols,
+         torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+/* To Dense */
+FUNC_DEF(torch::Tensor,
+         csr_to_dense_forward,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+FUNC_DEF(torch::Tensor,
+         csr_to_dense_backward,
+         torch::Tensor grad_Ad,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+/* Row sum */
+FUNC_DEF(torch::Tensor,
+         csr_row_sum_forward,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+FUNC_DEF(torch::Tensor,
+         csr_row_sum_backward,
+         torch::Tensor grad_x,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+/* CSR Extract diagonal */
+FUNC_DEF(torch::Tensor,
+         csr_extract_diagonal_forward,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+FUNC_DEF(torch::Tensor,
+         csr_extract_diagonal_backward,
+         torch::Tensor grad_x,
+         int A_rows, int A_cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
 
 #endif
