@@ -1,7 +1,6 @@
 import torch
 import torch.nn
 import numml.sparse as sp
-from numml.profiler import Profiler
 
 
 class GCNConv(torch.nn.Module):
@@ -55,14 +54,10 @@ class GCNConv(torch.nn.Module):
             X = X.unsqueeze(1)
 
         if self.normalize:
-            with Profiler('Computation of D'):
-                D = (A.row_sum() + 1.) ** -0.5
-            with Profiler('XTheta'):
-                XTheta = X @ self.weights
-            with Profiler('XDTheta'):
-                XDTheta = (D[:, None] * XTheta)
-            with Profiler('Xprime'):
-                Xprime = D[:, None] * (A @ XDTheta + XDTheta)
+            D = (A.row_sum() + 1.) ** -0.5
+            XTheta = X @ self.weights
+            XDTheta = (D[:, None] * XTheta)
+            Xprime = D[:, None] * (A @ XDTheta + XDTheta)
         else:
             Xprime = A @ (X @ self.weights)
 
