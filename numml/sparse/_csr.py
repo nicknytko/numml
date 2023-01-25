@@ -949,7 +949,29 @@ class SparseCSRTensor(object):
         return idx
 
     def diagonal(self):
+        '''
+        Returns the diagonal entries of the matrix expressed as a flattened min{m, n} vector,
+        given that the matrix has dimensions m x n.
+
+        Returns
+        -------
+        diag : torch.Tensor
+          Diagonal entries
+        '''
+
         return spdiag.apply(self.shape, self.data, self.indices, self.indptr)
+
+    def trace(self):
+        '''
+        Returns the trace of the matrix, i.e., sum of the diagonal entries.
+
+        Returns
+        -------
+        trace : torch.Tensor
+          Matrix trace as a scalar-valued Torch tensor.
+        '''
+
+        return self.diagonal().sum()
 
     def tril(self, k=0):
         L_data, L_indices, L_indptr = tril.apply(self.shape, self.data, self.indices, self.indptr, k)
