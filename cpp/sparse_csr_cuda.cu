@@ -1493,7 +1493,7 @@ __global__ void kernel_csr_extract_diagonal_backward(
     for (int64_t row_i = A_indptr[row]; row_i < A_indptr[row + 1]; row_i++) {
         const int64_t col = A_indices[row_i];
         const scalar_t val = (row == col) ? grad_row : 0.;
-        grad_A_data[row_i] = grad_row;
+        grad_A_data[row_i] = val;
     }
 }
 
