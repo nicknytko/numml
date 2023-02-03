@@ -153,4 +153,16 @@ FUNC_DEF(torch::Tensor,
          int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
 
+/* CSR Extract triangular entries */
+FUNC_DEF(std::vector<torch::Tensor>,
+         csr_extract_triangle_forward,
+         const int A_rows, const int A_cols, const int k, const bool upper,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+
+FUNC_DEF(torch::Tensor,
+         csr_extract_triangle_backward,
+         const int A_rows, const int A_cols, const int k, const bool upper,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         torch::Tensor grad_T, torch::Tensor T_indices, torch::Tensor T_indptr);
+
 #endif

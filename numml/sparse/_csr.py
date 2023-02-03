@@ -234,99 +234,65 @@ class splincomb(torch.autograd.Function):
 class tril(torch.autograd.Function):
     @staticmethod
     def forward(ctx, shape,
-                A_data, A_col_ind, A_rowptr,
-                k):
-        L_data = []
-        L_indices = []
-        L_indptr = []
+                A_data, A_col_ind, A_rowptr, k):
+        T_data, T_indices, T_indptr = \
+            numml_torch_cpp.csr_extract_triangle_forward(shape[0], shape[1], k, False,
+                                                         A_data, A_indices, A_indptr)
 
-        L_to_A = []
-
-        for row in range(shape[0]):
-            L_indptr.append(len(L_data))
-
-            for i in range(A_rowptr[row], A_rowptr[row + 1]):
-                col = A_col_ind[i].item()
-                if col > row + k:
-                    break
-
-                L_data.append(A_data[i])
-                L_indices.append(A_col_ind[i])
-                L_to_A.append(i)
-        L_indptr.append(len(L_data))
-
-        L_data = torch.Tensor(L_data).to(A_data.device)
-        L_indices = torch.Tensor(L_indices).long().to(A_data.device)
-        L_indptr = torch.Tensor(L_indptr).long().to(A_data.device)
-
-        L_to_A = torch.Tensor(L_to_A).long().to(A_data.device)
-        ctx.save_for_backward(A_col_ind, A_rowptr, L_to_A)
+        ctx.save_for_backward(A_data, A_indices, A_indptr, T_data, T_indices, T_indptr)
+        ctx.k = k
         ctx.shape = shape
 
-        return L_data, L_indices, L_indptr
+        return T_data, T_indices, T_indptr
+
 
     @staticmethod
     def backward(ctx, grad_L_data, _grad_L_indices, _grad_L_indptr):
-        A_col_ind, A_rowptr, L_to_A = ctx.saved_tensors
+        A_data, A_indices, A_indptr, T_data, T_indices, T_indptr = ctx.saved_tensors
+        k = ctx.k
         shape = ctx.shape
 
-        grad_A_data = torch.zeros_like(A_col_ind)
-        for i in range(len(grad_L_data)):
-            grad_A_data[L_to_A[i]] = grad_L_data[i]
+        grad_A_data = \
+            numml_torch_cpp.csr_extract_triangle_backward(shape[0], shape[1], k, True,
+                                                          A_data, A_indices, A_indptr,
+                                                          grad_L_data, T_indices, T_indptr)
 
         return (None, # shape
                 grad_A_data, # A_data
-                None, # A_col_ind
-                None, # A_rowptr
+                None, # A_indices
+                None, # A_indptr
                 None) # k
+
 
 class triu(torch.autograd.Function):
     @staticmethod
     def forward(ctx, shape,
-                A_data, A_col_ind, A_rowptr,
-                k):
-        U_data = []
-        U_indices = []
-        U_indptr = []
+                A_data, A_indices, A_indptr, k):
+        T_data, T_indices, T_indptr = \
+            numml_torch_cpp.csr_extract_triangle_forward(shape[0], shape[1], k, True,
+                                                         A_data, A_indices, A_indptr)
 
-        U_to_A = []
-
-        for row in range(shape[0]):
-            U_indptr.append(len(U_data))
-
-            for i in range(A_rowptr[row], A_rowptr[row + 1]):
-                col = A_col_ind[i].item()
-                if col < row + k:
-                    continue
-
-                U_data.append(A_data[i])
-                U_indices.append(A_col_ind[i])
-                U_to_A.append(i)
-        U_indptr.append(len(U_data))
-
-        U_data = torch.Tensor(U_data).to(A_data.device)
-        U_indices = torch.Tensor(U_indices).long().to(A_data.device)
-        U_indptr = torch.Tensor(U_indptr).long().to(A_data.device)
-
-        U_to_A = torch.Tensor(U_to_A).long().to(A_data.device)
-        ctx.save_for_backward(A_col_ind, A_rowptr, U_to_A)
+        ctx.save_for_backward(A_data, A_indices, A_indptr, T_data, T_indices, T_indptr)
+        ctx.k = k
         ctx.shape = shape
 
-        return U_data, U_indices, U_indptr
+        return T_data, T_indices, T_indptr
 
     @staticmethod
     def backward(ctx, grad_U_data, _grad_U_indices, _grad_U_indptr):
-        A_col_ind, A_rowptr, U_to_A = ctx.saved_tensors
+        A_data, A_indices, A_indptr, T_data, T_indices, T_indptr = ctx.saved_tensors
+        k = ctx.k
         shape = ctx.shape
 
-        grad_A_data = torch.zeros_like(A_col_ind)
-        for i in range(len(grad_U_data)):
-            grad_A_data[U_to_A[i]] = grad_U_data[i]
+        grad_A_data = \
+            numml_torch_cpp.csr_extract_triangle_backward(shape[0], shape[1], k, True,
+                                                          A_data, A_indices, A_indptr,
+                                                          grad_U_data, T_indices, T_indptr)
 
         return (None, # shape
                 grad_A_data, # A_data
-                None, # A_col_ind
-                None, # A_rowptr
+                None, # A_indices
+                None, # A_indptr
                 None) # k
 
 

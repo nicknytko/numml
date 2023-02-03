@@ -1211,3 +1211,104 @@ FUNC_IMPL_CPU(torch::Tensor,
 
     return grad_A_data;
 }
+
+/* CSR extract upper/lower triangle entries */
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              csr_extract_triangle_forward,
+              const int A_rows, const int A_cols, const int k, const bool upper,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+
+    auto int_tens_opts = torch::TensorOptions()
+        .dtype(torch::kInt64);
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype());
+
+    torch::Tensor T_data;
+    torch::Tensor T_indices;
+    torch::Tensor T_indptr = torch::empty({A_rows + 1}, int_tens_opts);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_extract_triangle_forward_cpu", ([&] {
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+
+        auto T_indptr_acc = T_indptr.accessor<int64_t, 1>();
+
+        /* First, grab nonzeros in each row. */
+        int64_t cum_nnz = 0;
+        for (int64_t row = 0; row < A_rows; row++) {
+            T_indptr_acc[row] = cum_nnz;
+
+            for (int64_t row_i = A_indptr_acc[row]; row_i < A_indptr_acc[row + 1]; row_i++) {
+                const int64_t col = A_indices_acc[row_i];
+
+                if ((upper && col >= row + k) ||
+                    (!upper && col <= row + k)) {
+                    cum_nnz++;
+                }
+            }
+        }
+        T_indptr_acc[A_rows] = cum_nnz;
+
+        /* Now allocate space and extract entries. */
+        T_data = torch::empty({cum_nnz}, scalar_tens_opts);
+        T_indices = torch::empty({cum_nnz}, int_tens_opts);
+
+        auto T_data_acc = T_data.accessor<scalar_t, 1>();
+        auto T_indices_acc = T_indices.accessor<int64_t, 1>();
+
+        cum_nnz = 0; /* re-use this as current output pointer */
+
+        for (int64_t row = 0; row < A_rows; row++) {
+            for (int64_t row_i = A_indptr_acc[row]; row_i < A_indptr_acc[row + 1]; row_i++) {
+                const int64_t col = A_indices_acc[row_i];
+
+                if ((upper && col >= row + k) ||
+                    (!upper && col <= row + k)) {
+
+                    T_data_acc[cum_nnz] = A_data_acc[row_i];
+                    T_indices_acc[cum_nnz] = A_indices_acc[row_i];
+                    cum_nnz++;
+                }
+            }
+        }
+    }));
+
+    return {T_data, T_indices, T_indptr};
+}
+
+FUNC_IMPL_CPU(torch::Tensor,
+              csr_extract_triangle_backward,
+              const int A_rows, const int A_cols, const int k, const bool upper,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              torch::Tensor grad_T, torch::Tensor T_indices, torch::Tensor T_indptr) {
+
+    torch::Tensor grad_A_data = torch::zeros_like(A_data);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_extract_triangle_backward_cpu", ([&] {
+        auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+
+        const auto T_data_acc = grad_T.accessor<scalar_t, 1>();
+        const auto T_indices_acc = T_indices.accessor<int64_t, 1>();
+        const auto T_indptr_acc = T_indptr.accessor<int64_t, 1>();
+
+        int64_t cur_ptr = 0;
+
+        for (int64_t row = 0; row < A_rows; row++) {
+            for (int64_t row_i = A_indptr_acc[row]; row_i < A_indptr_acc[row + 1]; row_i++) {
+                const int64_t col = A_indices_acc[row_i];
+
+                if ((upper && col >= row + k) ||
+                    (!upper && col <= row + k)) {
+                    grad_A_data_acc[row_i] = T_data_acc[cur_ptr];
+                    cur_ptr++;
+                }
+            }
+        }
+    }));
+
+    return grad_A_data;
+}
