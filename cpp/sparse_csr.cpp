@@ -328,9 +328,38 @@ FUNC_IMPL_DISPATCH(torch::Tensor,
     }
 }
 
+FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+                   spmul_forward,
+                   const int rows, const int cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
+    if (is_cuda(A_data)) {
+        return {};
+    } else {
+        return spmul_forward_cpu(rows, cols,
+                                 A_data, A_indices, A_indptr,
+                                 B_data, B_indices, B_indptr);
+    }
+}
+
+FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
+                   spmul_backward,
+                   const int rows, const int cols,
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr,
+                   torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr) {
+    if (is_cuda(A_data)) {
+        return {};
+    } else {
+        return spmul_backward_cpu(rows, cols,
+                                  A_data, A_indices, A_indptr,
+                                  B_data, B_indices, B_indptr,
+                                  grad_C_data, C_indices, C_indptr);
+    }
+}
 
 #define DEF_PYBIND(NAME, DESC)                                          \
-    m.def(#NAME "_forward", & NAME##_forward, DESC " forward");        \
+    m.def(#NAME "_forward", & NAME##_forward, DESC " forward");         \
     m.def(#NAME "_backward", & NAME##_backward, DESC " backward");
 
 #define DEF_PYBIND2(NAME, DESC)                 \
@@ -349,4 +378,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     DEF_PYBIND(csr_row_sum, "CSR row sum");
     DEF_PYBIND(csr_extract_diagonal, "CSR extract diagonal");
     DEF_PYBIND(csr_extract_triangle, "CSR extract upper/lower triangular region");
+    DEF_PYBIND(spmul, "Sparse Hadamard/entrywise product");
 }

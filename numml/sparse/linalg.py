@@ -2,6 +2,7 @@ import torch
 import numml_torch_cpp
 import numpy as np
 import numml.utils as utils
+import numml.sparse as sp
 
 
 class sptrsv(torch.autograd.Function):
@@ -52,7 +53,7 @@ def splu(A):
     '''
 
     M_data, M_indices, M_indptr = numml_torch_cpp.splu(A.shape[0], A.shape[1], A.data, A.indices, A.indptr)[:3]
-    return SparseCSRTensor((M_data, M_indices, M_indptr), A.shape)
+    return sp.SparseCSRTensor((M_data, M_indices, M_indptr), A.shape)
 
 
 class spsolve_fn(torch.autograd.Function):

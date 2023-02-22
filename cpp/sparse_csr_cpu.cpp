@@ -1312,3 +1312,159 @@ FUNC_IMPL_CPU(torch::Tensor,
 
     return grad_A_data;
 }
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              spmul_forward,
+              const int rows, const int cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
+
+    auto int_tens_opts = torch::TensorOptions()
+        .dtype(torch::kInt64);
+
+    auto scalar_tens_opts = torch::TensorOptions()
+        .dtype(A_data.dtype());
+
+    torch::Tensor C_data_tens;
+    torch::Tensor C_indices_tens;
+    torch::Tensor C_indptr_tens;
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spmul_forward_cpu", ([&] {
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+
+        const auto B_data_acc = B_data.accessor<scalar_t, 1>();
+        const auto B_indices_acc = B_indices.accessor<int64_t, 1>();
+        const auto B_indptr_acc = B_indptr.accessor<int64_t, 1>();
+
+        std::vector<scalar_t> C_data;
+        std::vector<int64_t> C_indices;
+        std::vector<int64_t> C_indptr;
+
+        /* Sparse multiplication is an intersection of the sparsity pattern of A and B,
+           which should be bounded by the max of nonzeros of each. */
+        C_data.reserve(std::max(A_data.size(0), B_data.size(0)));
+        C_indices.reserve(std::max(A_data.size(0), B_data.size(0)));
+        C_indptr.reserve(rows + 1);
+
+        for (int64_t row = 0; row < rows; row++) {
+            /* Indptr for this row is where we are in data array. */
+            C_indptr.push_back(C_data.size());
+
+            int64_t i_A = A_indptr_acc[row];
+            int64_t i_B = B_indptr_acc[row];
+
+            const int64_t end_A = A_indptr_acc[row + 1];
+            const int64_t end_B = B_indptr_acc[row + 1];
+
+            /* Multiply the row of A and B */
+            while (i_A < end_A && i_B < end_B) {
+                const int64_t col_A = A_indices_acc[i_A];
+                const int64_t col_B = B_indices_acc[i_B];
+
+                if (col_A < col_B) {
+                    i_A++;
+                } else if (col_A > col_B) {
+                    i_B++;
+                } else { /* we hit the same row-column pair in both matrices */
+                    C_data.push_back(A_data_acc[i_A] + B_data_acc[i_B]);
+                    C_indices.push_back(col_A);
+                    i_A++;
+                    i_B++;
+                }
+            }
+
+            /* Exhausted shared indices, there are no more possible entries to add. */
+        }
+
+        C_indptr.push_back(C_data.size());
+
+        C_data_tens = torch::from_blob(C_data.data(), {static_cast<int64_t>(C_data.size())}, scalar_tens_opts).clone();
+        C_indices_tens = torch::from_blob(C_indices.data(), {static_cast<int64_t>(C_indices.size())}, int_tens_opts).clone();
+        C_indptr_tens = torch::from_blob(C_indptr.data(), {static_cast<int64_t>(C_indptr.size())}, int_tens_opts).clone();
+    }));
+
+    return {
+        C_data_tens,
+        C_indices_tens,
+        C_indptr_tens
+    };
+}
+
+FUNC_IMPL_CPU(std::vector<torch::Tensor>,
+              spmul_backward,
+              const int rows, const int cols,
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr,
+              torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr) {
+
+    torch::Tensor grad_A = torch::zeros_like(A_data);
+    torch::Tensor grad_B = torch::zeros_like(B_data);
+
+    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spmul_backward_cpu", ([&] {
+        const auto A_data_acc = A_data.accessor<scalar_t, 1>();
+        const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+        const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+        auto grad_A_acc = grad_A.accessor<scalar_t, 1>();
+
+        const auto B_data_acc = B_data.accessor<scalar_t, 1>();
+        const auto B_indices_acc = B_indices.accessor<int64_t, 1>();
+        const auto B_indptr_acc = B_indptr.accessor<int64_t, 1>();
+        auto grad_B_acc = grad_B.accessor<scalar_t, 1>();
+
+        const auto C_indices_acc = C_indices.accessor<int64_t, 1>();
+        const auto C_indptr_acc = C_indptr.accessor<int64_t, 1>();
+        const auto grad_C_acc = grad_C_data.accessor<scalar_t, 1>();
+
+        // /* grad_A = alpha * grad_c (*) mask(A) */
+        // for (int64_t row = 0; row < rows; row++) {
+        //     int64_t A_i = A_indptr_acc[row];
+        //     int64_t C_i = C_indptr_acc[row];
+
+        //     const int64_t A_end = A_indptr_acc[row + 1];
+        //     const int64_t C_end = C_indptr_acc[row + 1];
+
+        //     while (A_i < A_end && C_i < C_end) {
+        //         const int64_t A_col = A_indices_acc[A_i];
+        //         const int64_t C_col = C_indices_acc[C_i];
+
+        //         if (A_col < C_col) {
+        //             A_i++;
+        //         } else if (A_col > C_col) {
+        //             C_i++;
+        //         } else {
+        //             grad_A_acc[A_i] = grad_C_acc[C_i] * alpha_c;
+        //             A_i++;
+        //             C_i++;
+        //         }
+        //     }
+        // }
+
+        // /* grad_B = beta * grad_c (*) mask(B) */
+        // for (int64_t row = 0; row < rows; row++) {
+        //     int64_t B_i = B_indptr_acc[row];
+        //     int64_t C_i = C_indptr_acc[row];
+
+        //     const int64_t B_end = B_indptr_acc[row + 1];
+        //     const int64_t C_end = C_indptr_acc[row + 1];
+
+        //     while (B_i < B_end && C_i < C_end) {
+        //         const int64_t B_col = B_indices_acc[B_i];
+        //         const int64_t C_col = C_indices_acc[C_i];
+
+        //         if (B_col < C_col) {
+        //             B_i++;
+        //         } else if (B_col > C_col) {
+        //             C_i++;
+        //         } else {
+        //             grad_B_acc[B_i] = grad_C_acc[C_i] * beta_c;
+        //             B_i++;
+        //             C_i++;
+        //         }
+        //     }
+        // }
+    }));
+
+    return {grad_A, grad_B};
+}

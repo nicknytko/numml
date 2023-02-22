@@ -165,4 +165,19 @@ FUNC_DEF(torch::Tensor,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
          torch::Tensor grad_T, torch::Tensor T_indices, torch::Tensor T_indptr);
 
+/* Hadamard product */
+FUNC_DEF(std::vector<torch::Tensor>,
+         spmul_forward,
+         const int rows, const int cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr);
+
+FUNC_DEF(std::vector<torch::Tensor>,
+         spmul_backward,
+         const int rows, const int cols,
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr,
+         torch::Tensor grad_C_data, torch::Tensor C_indices, torch::Tensor C_indptr);
+
+
 #endif
