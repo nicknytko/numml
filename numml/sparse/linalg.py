@@ -56,6 +56,28 @@ def splu(A):
     return sp.SparseCSRTensor((M_data, M_indices, M_indptr), A.shape)
 
 
+def splu_solve(A_LU, b):
+    '''
+    Given a sparse LU factorization, solve Ax = b.
+
+    Parameters
+    ----------
+    A_LU : numml.sparse.SparseCSRTensor
+      The output of splu()
+    b : torch.Tensor
+      Vector right-hand-side
+
+    Returns
+    -------
+    x : torch.Tensor
+      Solution to the matrix equation.
+    '''
+
+    y = spsolve_triangular(A_LU, b, True, True)
+    z = spsolve_triangular(A_LU, y, False, False)
+    return z
+
+
 class spsolve_fn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, A_shape, A_data, A_indices, A_indptr, b):
