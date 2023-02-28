@@ -973,6 +973,28 @@ class SparseCSRTensor(object):
 
         return self.diagonal().sum()
 
+   def conjugate(self):
+        '''
+        Element-wise complex conjugation
+        Returns
+        -------
+        A_conjugate : SparseCSRTensor
+          Matrix whose entries have complex conjugation applied
+        '''
+
+        return SparseCSRTensor((self.data.conj(), self.indices, self.indptr), self.shape)
+
+    def conj(self):
+        '''
+        Element-wise complex conjugation
+        Returns
+        -------
+        A_conjugate : SparseCSRTensor
+          Matrix whose entries have complex conjugation applied
+        '''
+
+        return self.conjugate()
+
     def tril(self, k=0):
         L_data, L_indices, L_indptr = tril.apply(self.shape, self.data, self.indices, self.indptr, k)
         return SparseCSRTensor((L_data, L_indices, L_indptr), self.shape)
@@ -999,9 +1021,24 @@ class SparseCSRTensor(object):
         At_shape, At_data, At_indices, At_indptr = sptranspose.apply(self.shape, self.data, self.indices, self.indptr)
         return SparseCSRTensor((At_data, At_indices, At_indptr), At_shape)
 
+    def hermitian(self):
+        '''
+        Take the Hermitian transpose of this tensor.
+        Returns
+        Ah : SparseCSRTensor
+          Transposed, conjugated version of the tensor.
+        '''
+
+        At_shape, At_data, At_indices, At_indptr = sptranspose.apply(self.shape, self.data.conj(), self.indices, self.indptr)
+        return SparseCSRTensor((At_data, At_indices, At_indptr), At_shape)
+
     @property
     def T(self):
         return self.transpose()
+
+    @property
+    def H(self):
+        return self.hermitian()
 
     @property
     def device(self):

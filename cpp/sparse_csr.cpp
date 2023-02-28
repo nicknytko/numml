@@ -297,34 +297,23 @@ FUNC_IMPL_DISPATCH(torch::Tensor,
     }
 }
 
+#define DEF_PYBIND(NAME, DESC)                                          \
+    m.def(#NAME "_forward", & NAME##_forward, DESC " forward");         \
+    m.def(#NAME "_backward", & NAME##_backward, DESC " backward");
+
+#define DEF_PYBIND2(NAME, DESC)                 \
+    m.def(#NAME, &NAME, DESC);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("spgemv_forward", &spgemv_forward, "SPGEMV forward");
-    m.def("spgemv_backward", &spgemv_backward, "SPGEMV backward");
-
-    m.def("spgemm_forward", &spgemm_forward, "SPGEMM forward");
-    m.def("spgemm_backward", &spgemm_backward, "SPGEMM backward");
-
-    m.def("csr_transpose_forward", &csr_transpose_forward, "CSR Transpose forward");
-    m.def("csr_transpose_backward", &csr_transpose_backward, "CSR Transpose backward");
-
-    m.def("splincomb_forward", &splincomb_forward, "Sparse linear combination forward");
-    m.def("splincomb_backward", &splincomb_backward, "Sparse linear combination backward");
-
-    m.def("spdmm_forward", &spdmm_forward, "Sparse times dense matrix forward");
-    m.def("spdmm_backward", &spdmm_backward, "Sparse times dense matrix backward");
-
-    m.def("sptrsv_forward", &sptrsv_forward, "Sparse triangular solve forward");
-    m.def("sptrsv_backward", &sptrsv_backward, "Sparse triangular solve backward");
-
-    m.def("splu", &splu, "Sparse LU decomposition");
-    m.def("spsolve_backward", &spsolve_backward, "Sparse LU solve backward");
-
-    m.def("csr_to_dense_forward", &csr_to_dense_forward, "CSR to dense forward");
-    m.def("csr_to_dense_backward", &csr_to_dense_backward, "CSR to dense backward");
-
-    m.def("csr_row_sum_forward", &csr_row_sum_forward, "CSR row sum forward");
-    m.def("csr_row_sum_backward", &csr_row_sum_backward, "CSR row sum backward");
-
-    m.def("csr_extract_diagonal_forward", &csr_extract_diagonal_forward, "CSR extract diagonal forward");
-    m.def("csr_extract_diagonal_backward", &csr_extract_diagonal_backward, "CSR extract diagonal backward");
+    DEF_PYBIND(spgemv, "SPGEMV");
+    DEF_PYBIND(spgemm, "SPGEMM");
+    DEF_PYBIND(csr_transpose, "CSR Transpose");
+    DEF_PYBIND(splincomb, "Sparse linear combination");
+    DEF_PYBIND(spdmm, "Sparse times dense matrix");
+    DEF_PYBIND(sptrsv, "Sparse triangular solve");
+    DEF_PYBIND2(splu, "Sparse LU decomposition");
+    DEF_PYBIND2(spsolve_backward, "Sparse LU solve backward");
+    DEF_PYBIND(csr_to_dense, "CSR to dense");
+    DEF_PYBIND(csr_row_sum, "CSR row sum");
+    DEF_PYBIND(csr_extract_diagonal, "CSR extract diagonal");
 }
