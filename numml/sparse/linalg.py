@@ -66,7 +66,6 @@ def splu_solve(A_LU, b):
       The output of splu()
     b : torch.Tensor
       Vector right-hand-side
-
     Returns
     -------
     x : torch.Tensor
