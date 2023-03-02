@@ -1,6 +1,7 @@
 from setuptools import setup, Extension
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CppExtension
 import os
+import platform
 
 def find_cpp_files(directory, allow_cuda):
     files = os.listdir(directory)
@@ -12,11 +13,23 @@ def find_cpp_files(directory, allow_cuda):
             out = out + find_cpp_files(os.path.join(directory, f))
     return out
 
+# Native code for sparse CSR implementations
 # Detect if we have cuda installed and compile accordingly
 native_ext = None
 
+cxx_args = [
+    '-O2',
+    '-std=c++17',
+    '-w'
+]
+
+if platform.system() == 'Darwin':
+    cxx_args.append('-I/opt/homebrew/include')
+
 if 'CUDA_HOME' in os.environ or 'CUDA_PATH' in os.environ:
     print('Detected CUDA, compiling with CUDA acceleration...')
+    cxx_args.append('-DCUDA_ENABLED=1')
+
     native_ext = CUDAExtension(name='numml_torch_cpp',
                                sources=find_cpp_files('cpp', allow_cuda=True),
                                include_dirs=[
@@ -24,18 +37,16 @@ if 'CUDA_HOME' in os.environ or 'CUDA_PATH' in os.environ:
                                ],
                                extra_compile_args={
                                    'nvcc': ['-std=c++17'],
-                                   'cxx': ['-DCUDA_ENABLED=1', '-O2', '-std=c++17', '-w'],
+                                   'cxx': cxx_args
                                })
 
 else:
     print('No CUDA detected, compiling CPU implementation only...')
+    cxx_args.append('-DCUDA_ENABLED=0')
+
     native_ext = CppExtension(name='numml_torch_cpp',
                            sources=find_cpp_files('cpp', allow_cuda=False),
-                           extra_compile_args=[
-                               '-std=c++17',
-                               '-DCUDA_ENABLED=0',
-                               '-O2'
-                           ])
+                           extra_compile_args=cxx_args)
 
 setup(name='numml',
       version='0.0.1',
