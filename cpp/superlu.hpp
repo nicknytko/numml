@@ -37,6 +37,12 @@ constexpr const c10::ScalarType type_to_torch_dtype(const std::type_info& type) 
     }
 }
 
+#define delete_if_exists(x) do {                \
+    if ((x) != nullptr) {                       \
+        delete x;                               \
+        x = nullptr;                            \
+    }} while (0);
+
 template<typename T>
 class SuperLUMatrix {
 public:
@@ -67,27 +73,26 @@ public:
 
     SuperLUMatrix(superlu_c::SuperMatrix&& mat) {
         std::memcpy(&matrix, mat, sizeof(superlu_c::SuperMatrix));
-        delete mat.Store;
         mat.Store = nullptr;
     }
 
     ~SuperLUMatrix() {
         if (matrix.Store != nullptr) {
-            superlu_c::NCformat* store = static_cast<superlu_c::NCformat*>(matrix.Store);
+            if (matrix.Stype == superlu_c::SLU_NC) {
+                superlu_c::NCformat* store = static_cast<superlu_c::NCformat*>(matrix.Store);
 
-            if (store->nzval != nullptr) {
-                delete store->nzval;
-                store->nzval = nullptr;
-            }
+                delete_if_exists(store->nzval);
+                delete_if_exists(store->rowind);
+                delete_if_exists(store->colptr);
+            } else if (matrix.Stype == superlu_c::SLU_SC) {
+                superlu_c::SCformat* store = static_cast<superlu_c::SCformat*>(matrix.Store);
 
-            if (store->rowind != nullptr) {
-                delete store->rowind;
-                store->rowind = nullptr;
-            }
-
-            if (store->colptr != nullptr) {
-                delete store->colptr;
-                store->colptr = nullptr;
+                delete_if_exists(store->nzval);
+                delete_if_exists(store->nzval_colptr);
+                delete_if_exists(store->rowind);
+                delete_if_exists(store->rowind_colptr);
+                delete_if_exists(store->col_to_sup);
+                delete_if_exists(store->sup_to_col);
             }
 
             delete store;
@@ -128,12 +133,18 @@ std::vector<torch::Tensor> superlu_to_torch_mat(const SuperLUMatrix<T>& mat) {
     int64_t* A_indptr = new int64_t[cols];
 
     /* Copy data over from the SuperLUMatrix */
-    std::memcpy(A_data, mat.matrix.Store->nzval, nnz * sizeof(T));
-    for (int64_t i = 0; i < nnz; i++) {
-        A_indices[i] = (int64_t) mat.matrix.Store->rowind[i];
-    }
-    for (int64_t i = 0; i < cols; i++) {
-        A_indptr[i] = (int64_t) mat.matrix.Store->colptr[i];
+    if (mat.matrix.Stype == superlu_c::SLU_NC) {
+        superlu_c::NCformat* store = static_cast<superlu_c::NCformat*>(P.matrix.Store);
+        std::memcpy(A_data, store->nzval, nnz * sizeof(T));
+        for (int64_t i = 0; i < nnz; i++) {
+            A_indices[i] = static_cast<int64_t>(store->rowind[i]);
+        }
+        for (int64_t i = 0; i < cols; i++) {
+            A_indptr[i] = static_cast<int64_t>(store->colptr[i]);
+        }
+    } else if (mat.matrix.Stype == superlu_c::SLU_SC) {
+        superlu_c::SCformat* store = static_cast<superlu_c::SCformat*>(P.matrix.Store);
+
     }
 
     /* Return torch representations */
