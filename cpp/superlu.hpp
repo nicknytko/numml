@@ -21,7 +21,7 @@ namespace superlu_c {
     #include <slu_util.h>
 }
 
-constexpr superlu_c::Dtype_t type_to_superlu_dtype(const std::type_info& type) {
+superlu_c::Dtype_t type_to_superlu_dtype(const std::type_info& type) {
     if (type == typeid(double)) {
         return superlu_c::SLU_D;
     } else if (type == typeid(float)) {
@@ -29,7 +29,7 @@ constexpr superlu_c::Dtype_t type_to_superlu_dtype(const std::type_info& type) {
     }
 }
 
-constexpr const c10::ScalarType type_to_torch_dtype(const std::type_info& type) {
+const c10::ScalarType type_to_torch_dtype(const std::type_info& type) {
     if (type == typeid(double)) {
         return torch::kFloat64;
     } else if (type == typeid(float)) {
@@ -68,11 +68,11 @@ public:
     }
 
     SuperLUMatrix(const superlu_c::SuperMatrix& mat) {
-        std::memcpy(&matrix, mat, sizeof(superlu_c::SuperMatrix));
+        std::memcpy(&matrix, &mat, sizeof(superlu_c::SuperMatrix));
     }
 
     SuperLUMatrix(superlu_c::SuperMatrix&& mat) {
-        std::memcpy(&matrix, mat, sizeof(superlu_c::SuperMatrix));
+        std::memcpy(&matrix, &mat, sizeof(superlu_c::SuperMatrix));
         mat.Store = nullptr;
     }
 
@@ -95,7 +95,7 @@ public:
                 delete_if_exists(store->sup_to_col);
             }
 
-            delete store;
+            delete matrix.Store;
             matrix.Store = nullptr;
         }
     }
@@ -134,7 +134,7 @@ std::vector<torch::Tensor> superlu_to_torch_mat(const SuperLUMatrix<T>& mat) {
 
     /* Copy data over from the SuperLUMatrix */
     if (mat.matrix.Stype == superlu_c::SLU_NC) {
-        superlu_c::NCformat* store = static_cast<superlu_c::NCformat*>(P.matrix.Store);
+        superlu_c::NCformat* store = static_cast<superlu_c::NCformat*>(mat.matrix.Store);
         std::memcpy(A_data, store->nzval, nnz * sizeof(T));
         for (int64_t i = 0; i < nnz; i++) {
             A_indices[i] = static_cast<int64_t>(store->rowind[i]);
@@ -143,8 +143,8 @@ std::vector<torch::Tensor> superlu_to_torch_mat(const SuperLUMatrix<T>& mat) {
             A_indptr[i] = static_cast<int64_t>(store->colptr[i]);
         }
     } else if (mat.matrix.Stype == superlu_c::SLU_SC) {
-        superlu_c::SCformat* store = static_cast<superlu_c::SCformat*>(P.matrix.Store);
-
+        superlu_c::SCformat* store = static_cast<superlu_c::SCformat*>(mat.matrix.Store);
+        /* TODO */
     }
 
     /* Return torch representations */
