@@ -203,16 +203,17 @@ FUNC_IMPL_DISPATCH(std::vector<torch::Tensor>,
                    torch::Tensor grad_x, torch::Tensor x,
                    int A_rows, int A_cols,
                    torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
-                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+                   torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                   torch::Tensor Pr, torch::Tensor Pc) {
 
     if (is_cuda(A_data)) {
         return spsolve_backward_cuda(grad_x, x, A_rows, A_cols,
                                      Mt_data, Mt_indices, Mt_indptr,
-                                     A_data, A_indices, A_indptr);
+                                     A_data, A_indices, A_indptr, Pr, Pc);
     } else {
         return spsolve_backward_cpu(grad_x, x, A_rows, A_cols,
                                     Mt_data, Mt_indices, Mt_indptr,
-                                    A_data, A_indices, A_indptr);
+                                    A_data, A_indices, A_indptr, Pr, Pc);
     }
 }
 
@@ -297,6 +298,26 @@ FUNC_IMPL_DISPATCH(torch::Tensor,
     }
 }
 
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   permute,
+                   torch::Tensor x, torch::Tensor P) {
+    if (is_cuda(x)) {
+        return permute_cuda(x, P);
+    } else {
+        return permute_cpu(x, P);
+    }
+}
+
+FUNC_IMPL_DISPATCH(torch::Tensor,
+                   permute_inverse,
+                   torch::Tensor x, torch::Tensor P) {
+    if (is_cuda(x)) {
+        return permute_inverse_cuda(x, P);
+    } else {
+        return permute_inverse_cpu(x, P);
+    }
+}
+
 #define DEF_PYBIND(NAME, DESC)                                          \
     m.def(#NAME "_forward", & NAME##_forward, DESC " forward");         \
     m.def(#NAME "_backward", & NAME##_backward, DESC " backward");
@@ -316,4 +337,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     DEF_PYBIND(csr_to_dense, "CSR to dense");
     DEF_PYBIND(csr_row_sum, "CSR row sum");
     DEF_PYBIND(csr_extract_diagonal, "CSR extract diagonal");
+    DEF_PYBIND2(permute, "Permutation of a vector");
+    DEF_PYBIND2(permute_inverse, "Inverse permutation of a vector");
 }

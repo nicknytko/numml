@@ -1247,7 +1247,8 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                torch::Tensor grad_x, torch::Tensor x,
                int A_rows, int A_cols,
                torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
-               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+               torch::Tensor Pr, torch::Tensor Pc) {
 
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
@@ -1514,4 +1515,34 @@ FUNC_IMPL_CUDA(torch::Tensor,
     }));
 
     return grad_A_data;
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+               permute,
+               torch::Tensor x, torch::Tensor P) {
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    torch::Tensor xp = torch::empty_like(x);
+
+    AT_DISPATCH_FLOATING_TYPES(x.type(), "permute_cuda", ([&] {
+        cuda_kernel_tensor_permute<<<
+            (x.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                tensor_acc(x, scalar_t), tensor_acc(xp, scalar_t), tensor_acc(P, int64_t), true);
+    }));
+
+    return xp;
+}
+
+FUNC_IMPL_CUDA(torch::Tensor,
+               permute_inverse,
+               torch::Tensor x, torch::Tensor P) {
+    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
+    torch::Tensor xp = torch::empty_like(x);
+
+    AT_DISPATCH_FLOATING_TYPES(x.type(), "permute_inverse_cuda", ([&] {
+        cuda_kernel_tensor_permute<<<
+            (x.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
+                tensor_acc(x, scalar_t), tensor_acc(xp, scalar_t), tensor_acc(P, int64_t), false);
+    }));
+
+    return xp;
 }

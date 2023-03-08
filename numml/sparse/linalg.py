@@ -52,11 +52,8 @@ def splu(A):
     gradients, use spsolve.
     '''
 
-    M_data, M_indices, M_indptr = numml_torch_cpp.splu(A.shape[0], A.shape[1], A.data, A.indices, A.indptr)[:3]
-    return sp.SparseCSRTensor((M_data, M_indices, M_indptr), A.shape)
-
-
-    return sp.SparseCSRTensor((M_data, M_indices, M_indptr), A.shape)
+    Pc, Pr, M_data, M_indices, M_indptr = numml_torch_cpp.splu(A.shape[0], A.shape[1], A.data, A.indices, A.indptr)[:5]
+    return Pc, Pr, sp.SparseCSRTensor((M_data, M_indices, M_indptr), A.shape)
 
 
 def splu_solve(A_LU, b):
@@ -74,33 +71,41 @@ def splu_solve(A_LU, b):
       Solution to the matrix equation.
     '''
 
-    y = spsolve_triangular(A_LU, b, True, True)
-    z = spsolve_triangular(A_LU, y, False, False)
-    return z
+    if isinstance(A_LU, tuple):
+        Pc, Pr, A_LU = A_LU
+        y = spsolve_triangular(A_LU, utils.permute_inverse(b, Pr), True, True)
+        return utils.permute(spsolve_triangular(A_LU, y, False, False), Pc)
+    else:
+        y = spsolve_triangular(A_LU, b, True, True)
+        return spsolve_triangular(A_LU, y, False, False)
 
 
 class spsolve_fn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, A_shape, A_data, A_indices, A_indptr, b):
-        M_data, M_indices, M_indptr, Mt_data, Mt_indices, Mt_indptr = \
+        Pc, Pr, M_data, M_indices, M_indptr, Mt_data, Mt_indices, Mt_indptr = \
             numml_torch_cpp.splu(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
 
-        y = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, True, True, b)
-        x = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, False, False, y)
+        y = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, True, True, utils.permute_inverse(b, Pr))
+        x = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, False, False, y)[Pc]
 
         ctx.shape = A_shape
-        ctx.save_for_backward(A_data, A_indices, A_indptr, Mt_data, Mt_indices, Mt_indptr, x)
+        ctx.save_for_backward(A_data, A_indices, A_indptr,
+                              Mt_data, Mt_indices, Mt_indptr, x, Pr, Pc)
 
         return x
 
+
     @staticmethod
     def backward(ctx, grad_x):
-        A_data, A_indices, A_indptr, Mt_data, Mt_indices, Mt_indptr, x = ctx.saved_tensors
+        A_data, A_indices, A_indptr,\
+            Mt_data, Mt_indices, Mt_indptr, x, Pr, Pc = ctx.saved_tensors
         shape = ctx.shape
 
         grad_A_data, grad_b = numml_torch_cpp.spsolve_backward(grad_x, x, shape[0], shape[1],
                                                                Mt_data, Mt_indices, Mt_indptr,
-                                                               A_data, A_indices, A_indptr)
+                                                               A_data, A_indices, A_indptr,
+                                                               Pr, Pc)
 
         return (None, # A_shape
                 grad_A_data, # A_data

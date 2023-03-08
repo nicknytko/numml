@@ -165,3 +165,9 @@ def unsqueeze_like(x, y):
     for dim in one_dim:
         x = torch.unsqueeze(x, dim)
     return x
+
+def permute(x, P):
+    return numml_torch_cpp.permute(x, P)
+
+def permute_inverse(x, P):
+    return numml_torch_cpp.permute_inverse(x, P)

@@ -1006,6 +1006,14 @@ class SparseCSRTensor(object):
     def detach(self):
         return SparseCSRTensor((self.data.detach(), self.indices, self.indptr), self.shape)
 
+    def mask(self):
+        '''
+        Returns a sparse matrix with the same sparsity as this matrix,
+        except for every nonzero replaced with the value one.
+        '''
+
+        return SparseCSRTensor((torch.ones_like(self.data), self.indices, self.indptr), self.shape)
+
     def transpose(self):
         '''
         Take the transpose of this tensor.

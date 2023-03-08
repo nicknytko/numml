@@ -174,11 +174,25 @@ public:
 };
 
 template<typename T>
-SuperLUMatrix<T> torch_to_superlu_mat(uint64_t rows, uint64_t cols,
+SuperLUMatrix<T> torch_to_superlu_mat(int rows, int cols,
                                       torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
-    const T* A_data_ptr = A_data.contiguous().data_ptr<T>();
-    const superlu_c::int_t* A_indices_ptr = A_indices.to(torch::kInt).contiguous().data_ptr<T>();
-    const superlu_c::int_t* A_indptr_ptr = A_indptr.to(torch::kInt).contiguous().data_ptr<T>();
+    const auto A_data_acc = A_data.accessor<T, 1>();
+    const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
+    const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
+
+    T* A_data_ptr = new T[A_data.size(0)];
+    superlu_c::int_t* A_indices_ptr = new superlu_c::int_t[A_indices.size(0)];
+    superlu_c::int_t* A_indptr_ptr = new superlu_c::int_t[A_indptr.size(0)];
+
+    for (uint64_t i = 0; i < A_data.size(0); i++) {
+        A_data_ptr[i] = A_data_acc[i];
+    }
+    for (uint64_t i = 0; i < A_indices.size(0); i++) {
+        A_indices_ptr[i] = A_indices_acc[i];
+    }
+    for (uint64_t i = 0; i < A_indptr.size(0); i++) {
+        A_indptr_ptr[i] = A_indptr_acc[i];
+    }
 
     superlu_c::int_t rows_int_t = static_cast<superlu_c::int_t>(rows);
     superlu_c::int_t cols_int_t = static_cast<superlu_c::int_t>(cols);
@@ -186,10 +200,12 @@ SuperLUMatrix<T> torch_to_superlu_mat(uint64_t rows, uint64_t cols,
     SuperLUMatrix<T> mat;
     mat.matrix.nrow = rows;
     mat.matrix.ncol = cols;
-    mat.matrix.Store.nnz = A_data.size(0);
-    mat.matrix.Store.nzval = A_data_ptr;
-    mat.matrix.Store.rowind = A_indices_ptr;
-    mat.matrix.Store.colptr = A_indptr_ptr;
+
+    superlu_c::NCformat* store = static_cast<superlu_c::NCformat*>(mat.matrix.Store);
+    store->nnz = A_data.size(0);
+    store->nzval = static_cast<void*>(A_data_ptr);
+    store->rowind = A_indices_ptr;
+    store->colptr = A_indptr_ptr;
 
     return mat;
 }
@@ -301,11 +317,15 @@ struct coo_coordinate_t {
     bool operator>(const coo_coordinate_t<T>& other) const {
         return !(*this < other && *this == other);
     }
+
+    template <typename Q>
+    friend std::ostream& operator<<(std::ostream& os, const coo_coordinate_t<Q>& coord);
 };
 
 template<typename T>
-bool coo_coordinate_comparison(const coo_coordinate_t<T>& self, const coo_coordinate_t<T>& other) {
-    return (self < other);
+std::ostream& operator<<(std::ostream& ostream, const coo_coordinate_t<T>& coord) {
+    ostream << "(" << coord.row << ", " << coord.col << "): " << coord.val;
+    return ostream;
 }
 
 template<typename T>
@@ -359,81 +379,44 @@ std::vector<torch::Tensor> superlu_factorize(SuperLUMatrix<T>& A) {
     superlu_c::NCformat* Ustore = static_cast<superlu_c::NCformat*>(U.Store);
     superlu_c::SCformat* Lstore = static_cast<superlu_c::SCformat*>(L.Store);
 
-    const int64_t lu_nnz = Lstore->nzval_colptr[cols];
-    std::vector<coo_coordinate_t<T>> coo_format;
-    coo_format.reserve(lu_nnz);
+    std::vector<coo_coordinate_t<T>> out_coo_format;
+    out_coo_format.reserve(Lstore->nzval_colptr[cols]);
 
-    /* For some reason, the L factor has both lower and upper triangular data ?!??! */
+    const T eps = T(1e-16);
+
+    /* What in the world is SuperLU doing here ????
+     * The U factor is stored in both L and U ?!?! */
     for (int64_t supernode = 0; supernode <= Lstore->nsuper; ++supernode) {
         const int64_t supernode_start_col = Lstore->sup_to_col[supernode];
         const int64_t supernode_end_col = Lstore->sup_to_col[supernode + 1];
+        const int64_t idx_start = Lstore->rowind_colptr[supernode_start_col];
+        const int64_t idx_end = Lstore->rowind_colptr[supernode_start_col + 1];
 
         for (int64_t col = supernode_start_col; col < supernode_end_col; ++col) {
-            const int64_t col_start = Lstore->nzval_colptr[col];
-            const int64_t col_end = Lstore->nzval_colptr[col + 1];
-            for (int64_t col_i = col_start; col_i < col_end; ++col_i) {
-                const int64_t row = Lstore->rowind[Lstore->rowind_colptr[col] + col_i - col_start];
-                coo_format.push_back({ row, col, static_cast<T*>(Lstore->nzval)[col_i] });
+            /* Extract from U */
+            for (int64_t idx = Ustore->colptr[col]; idx < Ustore->colptr[col + 1]; ++idx) {
+                const int64_t row = Ustore->rowind[idx];
+                const T val = static_cast<T*>(Ustore->nzval)[idx];
+                if (std::abs(val) > eps) {
+                    out_coo_format.push_back({ row, col, val });
+                }
+            }
+
+            /* Extract from L */
+            T* src = &static_cast<T*>(Lstore->nzval)[Lstore->nzval_colptr[col]];
+            for (int64_t idx = idx_start; idx < idx_end; ++idx) {
+                const int64_t row = Lstore->rowind[idx];
+                const T val = src[idx - idx_start];
+                if (std::abs(val) > eps) {
+                    out_coo_format.push_back({ row, col, val });
+                }
             }
         }
     }
-    std::sort(coo_format.begin(), coo_format.end(), coo_coordinate_comparison<T>);
-
-    std::vector<coo_coordinate_t<T>> U_coo_format;
-    for (int64_t col = 0; col < cols; col++) {
-        for (int64_t row_i = Ustore->colptr[col]; row_i < Ustore->colptr[col + 1]; row_i++) {
-            const int64_t row = Ustore->rowind[row_i];
-            U_coo_format.push_back({ row, col, static_cast<T*>(Ustore->nzval)[row_i] });
-        }
-    }
-    std::sort(coo_format.begin(), coo_format.end(), coo_coordinate_comparison<T>);
-
-    /* Now, add the explicit U factor */
-    std::vector<coo_coordinate_t<T>> out_coo_format;
-    out_coo_format.reserve(lu_nnz);
-
-    int64_t L_i = 0;
-    int64_t U_i = 0;
-    const double eps = 1e-12;
-    while (L_i < coo_format.size() &&
-           U_i < U_coo_format.size()) {
-
-        const coo_coordinate_t<T>& L_entry = coo_format[L_i];
-        const coo_coordinate_t<T>& U_entry = coo_format[U_i];
-
-        if (L_entry < U_entry) {
-            if (std::abs(L_entry.val) > eps) {
-                out_coo_format.push_back(L_entry);
-            }
-            L_i++;
-        } else if (U_entry < L_entry) {
-            if (std::abs(U_entry.val) > eps) {
-                out_coo_format.push_back(U_entry);
-            }
-            U_i++;
-        } else {
-            T combined = L_entry.val + U_entry.val;
-            if (std::abs(combined) > eps) {
-                out_coo_format.push_back({L_entry.row, L_entry.col, combined});
-            }
-            L_i++;
-            U_i++;
-        }
-    }
-    while (L_i < coo_format.size()) {
-        const coo_coordinate_t<T>& L_entry = coo_format[L_i];
-        if (std::abs(L_entry.val) > eps) {
-            out_coo_format.push_back(L_entry);
-        }
-        L_i++;
-    }
-    while (U_i < U_coo_format.size()) {
-        const coo_coordinate_t<T>& U_entry = coo_format[U_i];
-        if (std::abs(U_entry.val) > eps) {
-            out_coo_format.push_back(U_entry);
-        }
-        U_i++;
-    }
+    // std::sort(out_coo_format.begin(), out_coo_format.end()); /* <-- this doesn't do anything. why? */
+    // for (int64_t i = 0; i < out_coo_format.size(); i++) {
+    //     std::cerr << out_coo_format[i] << std::endl;
+    // }
 
     /** Convert to CSC representation */
     auto int_tens_opts = torch::TensorOptions()
@@ -463,9 +446,10 @@ std::vector<torch::Tensor> superlu_factorize(SuperLUMatrix<T>& A) {
         M_colptr_acc[i] = cumsum;
         cumsum += temp;
     }
+    M_colptr_acc[cols] = cumsum;
 
     /* Now insert row indices and data values */
-    for (int64_t i = 0; i < nnz; i++) {
+    for (int64_t i = 0; i < out_nnz; i++) {
         M_data_acc[i] = out_coo_format[i].val;
         M_rowindices_acc[i] = out_coo_format[i].row;
     }

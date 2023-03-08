@@ -115,7 +115,8 @@ FUNC_DEF(std::vector<torch::Tensor>,
          torch::Tensor grad_x, torch::Tensor x,
          int A_rows, int A_cols,
          torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
-         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
+         torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+         torch::Tensor Pr, torch::Tensor Pc);
 
 /* To Dense */
 FUNC_DEF(torch::Tensor,
@@ -153,4 +154,14 @@ FUNC_DEF(torch::Tensor,
          int A_rows, int A_cols,
          torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr);
 
+/** Misc */
+
+/* Vector permutations */
+FUNC_DEF(torch::Tensor,
+         permute,
+         torch::Tensor x, torch::Tensor P);
+
+FUNC_DEF(torch::Tensor,
+         permute_inverse,
+         torch::Tensor x, torch::Tensor P);
 #endif

@@ -757,16 +757,57 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     return {grad_A_data, grad_b};
 }
 
+FUNC_IMPL_CPU(torch::Tensor,
+              permute,
+              torch::Tensor x, torch::Tensor P) {
+    torch::Tensor xp = torch::empty_like(x);
+
+    AT_DISPATCH_FLOATING_TYPES(x.type(), "permute_cpu", ([&] {
+        const auto x_ = x.accessor<scalar_t, 1>();
+        auto xp_ = xp.accessor<scalar_t, 1>();
+        const auto P_ = P.accessor<int64_t, 1>();
+
+        for (int64_t i = 0; i < x.size(0); i++) {
+            xp_[i] = x_[P_[i]];
+        }
+    }));
+
+    return xp;
+}
+
+FUNC_IMPL_CPU(torch::Tensor,
+              permute_inverse,
+              torch::Tensor x, torch::Tensor P) {
+    torch::Tensor xp = torch::empty_like(x);
+
+    AT_DISPATCH_FLOATING_TYPES(x.type(), "permute_inverse_cpu", ([&] {
+        const auto x_ = x.accessor<scalar_t, 1>();
+        auto xp_ = xp.accessor<scalar_t, 1>();
+        const auto P_ = P.accessor<int64_t, 1>();
+
+        for (int64_t i = 0; i < x.size(0); i++) {
+            xp_[P_[i]] = x_[i];
+        }
+    }));
+
+    return xp;
+}
+
 FUNC_IMPL_CPU(std::vector<torch::Tensor>,
               spsolve_backward,
               torch::Tensor grad_x, torch::Tensor x,
               int A_rows, int A_cols,
               torch::Tensor Mt_data, torch::Tensor Mt_indices, torch::Tensor Mt_indptr,
-              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+              torch::Tensor Pr, torch::Tensor Pc) {
 
     /* grad_b = A^{-T} grad_x */
-    torch::Tensor grad_b_y = sptrsv_forward_cpu(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, true, false, grad_x);
-    torch::Tensor grad_b = sptrsv_forward_cpu(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, false, true, grad_b_y);
+    torch::Tensor grad_b_y = sptrsv_forward_cpu(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, true, false, permute_inverse_cpu(grad_x, Pc));
+    torch::Tensor grad_b = permute_cpu(sptrsv_forward_cpu(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, false, true, grad_b_y), Pr);
+
+    std::cerr << permute_cpu(grad_x, Pc) << std::endl;
+    std::cerr << grad_b_y << std::endl;
+    std::cerr << grad_b << std::endl;
 
     /* grad_A = (-grad_b x^T) (*) mask(A) */
     torch::Tensor grad_A_data = torch::empty_like(A_data);
