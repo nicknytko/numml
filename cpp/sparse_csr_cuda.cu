@@ -1253,8 +1253,8 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
 
     /* grad_b = A^{-T} grad_x */
-    torch::Tensor grad_b_y = sptrsv_forward_cuda(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, true, false, grad_x);
-    torch::Tensor grad_b = sptrsv_forward_cuda(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, false, true, grad_b_y);
+    torch::Tensor grad_b_y = sptrsv_forward_cuda(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, true, false, permute_inverse_cuda(grad_x, Pc));
+    torch::Tensor grad_b = permute_cuda(sptrsv_forward_cuda(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, false, true, grad_b_y), Pr);
 
     /* grad_A = (-grad_b x^T) (*) mask(A) */
     torch::Tensor grad_A_data = torch::empty_like(A_data);
@@ -1526,7 +1526,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
     AT_DISPATCH_FLOATING_TYPES(x.type(), "permute_cuda", ([&] {
         cuda_kernel_tensor_permute<<<
             (x.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-                tensor_acc(x, scalar_t), tensor_acc(xp, scalar_t), tensor_acc(P, int64_t), true);
+                x.size(0), tensor_acc(x, scalar_t), tensor_acc(xp, scalar_t), tensor_acc(P, int64_t), true);
     }));
 
     return xp;
@@ -1541,7 +1541,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
     AT_DISPATCH_FLOATING_TYPES(x.type(), "permute_inverse_cuda", ([&] {
         cuda_kernel_tensor_permute<<<
             (x.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-                tensor_acc(x, scalar_t), tensor_acc(xp, scalar_t), tensor_acc(P, int64_t), false);
+                x.size(0), tensor_acc(x, scalar_t), tensor_acc(xp, scalar_t), tensor_acc(P, int64_t), false);
     }));
 
     return xp;
