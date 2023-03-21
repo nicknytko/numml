@@ -973,7 +973,7 @@ class SparseCSRTensor(object):
 
         return self.diagonal().sum()
 
-   def conjugate(self):
+    def conjugate(self):
         '''
         Element-wise complex conjugation
         Returns
