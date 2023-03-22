@@ -4,12 +4,7 @@ A library for PyTorch providing sparse, differentiable CSR support.
 
 ### Installation
 
-There are submodules needed for CUDA library dependencies, clone this repo with
-```
-git clone --recurse-submodules https://github.com/nicknytko/numml
-```
-
-then, install with
+Clone normally and install with pip,
 ```
 pip3 install .
 ```

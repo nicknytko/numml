@@ -1,10 +1,6 @@
 #include "cuda_common.cuh"
 #include "sparse_csr.hpp"
 
-#include <cuco/static_map.cuh>
-#include <cuco/detail/hash_functions.cuh>
-#include <cuco/allocator.hpp>
-
 #include <chrono>
 
 /**
@@ -664,91 +660,9 @@ __global__ void cuda_kernel_assemble_C_masked(
     }
 }
 
-static torch::Tensor spgemm_backward_grad_B_square(torch::Tensor grad_C, torch::Tensor C_indices, torch::Tensor C_indptr,
-               int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
-               int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
-    const int C_rows = A_rows;
-    const int C_cols = B_cols;
-
-    at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
-
-    auto int_tens_opts = torch::TensorOptions()
-        .dtype(torch::kInt64)
-        .device(A_data.device().type(), A_data.device().index());
-
-    auto scalar_tens_opts = torch::TensorOptions()
-        .dtype(A_data.dtype())
-        .device(A_data.device().type(), A_data.device().index());
-
-    /* Compute grad_B = (A^T grad_C) (*) mask(B) */
-    const int64_t grad_B_nnz = B_indptr[B_indptr.size(0) - 1].item<int64_t>();
-
-    /* Create mapping of grad_B nonzeros to indices in grad_B data array */
-    const float map_load_factor = 0.6f;
-    cuco::static_map<coordinate_pair_t, int64_t> grad_B_idx_map(
-        static_cast<size_t>(static_cast<float>(grad_B_nnz) / map_load_factor),
-        cuco::sentinel::empty_key(coordinate_pair_t(-1, -1)),
-        cuco::sentinel::empty_value(int64_t(-1)),
-        cuco::static_map<coordinate_pair_t, int64_t>::allocator_type{},
-        main_stream);
-
-    cuda_kernel_create_index_map<<<(B_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-        B_rows, B_cols, tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t),
-        grad_B_idx_map.get_device_mutable_view());
-    cuda_check_kernel_launch_err();
-
-    /* Find NNZ in each row of \hat{grad_B}.  Note that this isn't actually a *row* in the
-       output, but rather just a set of work for each thread to do. */
-    torch::Tensor Bhat_nnz = torch::empty({A_rows}, int_tens_opts);
-    cuda_kernel_masked_AT_Chat_expansion_nnz<<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-        A_rows,
-        tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),
-        tensor_acc(C_indptr, int64_t), tensor_acc(C_indices, int64_t),
-        tensor_acc(Bhat_nnz, int64_t), grad_B_idx_map.get_device_view());
-    cuda_check_kernel_launch_err();
-
-    /* Cumulative sum to find starting point for each thread to write to. */
-    torch::Tensor Bhat_nnz_cumsum = Bhat_nnz.cumsum(0);
-    int64_t Bhat_total_nnz = Bhat_nnz_cumsum[Bhat_nnz_cumsum.size(0) - 1].item<int64_t>();
-
-    /* Compute the entries of Bhat via masked expansion */
-    torch::Tensor Bhat_I = torch::empty({Bhat_total_nnz}, int_tens_opts);
-    torch::Tensor Bhat_J = torch::empty({Bhat_total_nnz}, int_tens_opts);
-    torch::Tensor Bhat_V = torch::empty({Bhat_total_nnz}, scalar_tens_opts);
-
-    AT_DISPATCH_FLOATING_TYPES(grad_C.type(), "spgemm_backward_cuda", ([&] {
-        cuda_kernel_masked_AT_Chat_expansion<scalar_t><<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            A_rows,
-            tensor_acc(A_data, scalar_t), tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),
-            tensor_acc(grad_C, scalar_t), tensor_acc(C_indptr, int64_t), tensor_acc(C_indices, int64_t),
-            tensor_acc(Bhat_nnz_cumsum, int64_t), tensor_acc(Bhat_V, scalar_t), tensor_acc(Bhat_I, int64_t), tensor_acc(Bhat_J, int64_t),
-            grad_B_idx_map.get_device_view());
-    }));
-    cuda_check_kernel_launch_err();
-
-    /* Now, lexicographically sort entries of Bhat first by column index then by row index */
-    lexsort_coo_ijv(Bhat_I, Bhat_J, Bhat_V);
-
-    /* Find the ~actual~ number of nonzeros for each row of Bhat, now that we have the output */
-    Bhat_nnz_cumsum = Bhat_I.bincount(c10::nullopt, B_rows).cumsum(0);
-
-    /* Now, assemble the matrix */
-    const int64_t B_total_nnz = B_indptr[B_indptr.size(0) - 1].item<int64_t>();
-    torch::Tensor grad_B = torch::zeros({B_total_nnz}, scalar_tens_opts);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_backward_cuda", [&] {
-        cuda_kernel_assemble_C_data_only<<<(B_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
-            B_rows,
-            tensor_acc(Bhat_V, scalar_t), tensor_acc(Bhat_nnz_cumsum, int64_t), tensor_acc(Bhat_J, int64_t),
-            tensor_acc(grad_B, scalar_t), tensor_acc(B_indptr, int64_t));
-    });
-    cuda_check_kernel_launch_err();
-
-    return grad_B;
-}
-
-static torch::Tensor spgemm_backward_grad_B_nonsquare(torch::Tensor grad_C, torch::Tensor C_indices, torch::Tensor C_indptr,
-               int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
-               int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
+static torch::Tensor spgemm_backward_grad_B(torch::Tensor grad_C, torch::Tensor C_indices, torch::Tensor C_indptr,
+                                            int A_rows, int A_cols, torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr,
+                                            int B_rows, int B_cols, torch::Tensor B_data, torch::Tensor B_indices, torch::Tensor B_indptr) {
     const int C_rows = A_rows;
     const int C_cols = B_cols;
 
@@ -849,15 +763,9 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     cuda_check_kernel_launch_err();
 
     torch::Tensor grad_B;
-    if (false) {
-        grad_B = spgemm_backward_grad_B_square(grad_C, C_indices, C_indptr,
-                                               A_rows, A_cols, A_data, A_indices, A_indptr,
-                                               B_rows, B_cols, B_data, B_indices, B_indptr);
-    } else {
-        grad_B = spgemm_backward_grad_B_nonsquare(grad_C, C_indices, C_indptr,
-                                                  A_rows, A_cols, A_data, A_indices, A_indptr,
-                                                  B_rows, B_cols, B_data, B_indices, B_indptr);
-    }
+    grad_B = spgemm_backward_grad_B(grad_C, C_indices, C_indptr,
+                                    A_rows, A_cols, A_data, A_indices, A_indptr,
+                                    B_rows, B_cols, B_data, B_indices, B_indptr);
 
     return {grad_A, grad_B};
 }
