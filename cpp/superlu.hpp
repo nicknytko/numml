@@ -385,7 +385,9 @@ std::vector<torch::Tensor> superlu_factorize(SuperLUMatrix<T>& A) {
     const T eps = T(1e-16);
 
     /* What in the world is SuperLU doing here ????
-     * The U factor is stored in both L and U ?!?! */
+     * The U factor is stored in both L and U ?!?!
+     * We are following what SciPy is doing to convert the LU factorization
+     * https://github.com/scipy/scipy/blob/e799ae4bb3c7c2d165e2fcb7bccb5373b91e267d/scipy/sparse/linalg/_dsolve/_superluobject.c#L553 */
     for (int64_t supernode = 0; supernode <= Lstore->nsuper; ++supernode) {
         const int64_t supernode_start_col = Lstore->sup_to_col[supernode];
         const int64_t supernode_end_col = Lstore->sup_to_col[supernode + 1];
