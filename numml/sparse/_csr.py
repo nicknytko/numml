@@ -690,7 +690,18 @@ class SparseCSRTensor(object):
         else:
             raise RuntimeError(f'Unknown type for matmul: {type(x)}.')
 
-        if dims == 1:
+        if dims == 0:
+            # Multiplication by a scalar, special case depending on what our shape is
+            if self.shape[0] == 1 and self.shape[1] == 1:
+                # 1x1 matrix times scalar -> scalar
+                return self.data * x.item()
+            elif self.shape[0] == 1 or self.shape[1] == 1:
+                # 1xn or nx1 times scalar -> dense vector
+                return self.to_dense() * x.item()
+            else:
+                # mxn times scalar -> sparse matrix
+                return self.__mul__(x.item())
+        elif dims == 1:
             return self.spmv(x)
         elif dims == 2:
             if isinstance(x, SparseCSRTensor):
@@ -725,10 +736,11 @@ class SparseCSRTensor(object):
         '''
 
         # take advantage of the fact that sorted COO and CSR have entries in the same order
-        row_i = torch.empty(self.nnz, dtype=long)
+        row_i = torch.empty(self.nnz, dtype=torch.long)
         for i in range(self.shape[0]):
             row_i[self.indptr[i]:self.indptr[i+1]] = i
-        return torch.sparse_coo_tensor(torch.row_stack((row_i, self.indices)), self.data, self.shape)
+        row_i = row_i.to(self.device)
+        return torch.sparse_coo_tensor(torch.row_stack((row_i, self.indices)), self.data, self.shape, device=self.device)
 
     def to_scipy_csr(self):
         '''
