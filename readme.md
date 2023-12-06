@@ -2,6 +2,11 @@
 
 A library for PyTorch providing sparse, differentiable CSR support.
 
+### Prerequisites
+
+- PyTorch 2.0+
+- For CUDA acceleration, an Nvidia GPU that supports at least `sm_60` (Pascal) architecture.
+
 ### Installation
 
 Clone normally and install with pip,
