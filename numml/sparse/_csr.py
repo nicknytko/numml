@@ -684,7 +684,7 @@ class SparseCSRTensor(object):
     def __matmul__(self, x):
         dims = None
         if isinstance(x, torch.Tensor):
-            dims = len(torch.squeeze(x).shape)
+            dims = x.ndim
         elif isinstance(x, SparseCSRTensor):
             dims = 2
         else:
@@ -709,7 +709,27 @@ class SparseCSRTensor(object):
             elif isinstance(x, torch.Tensor):
                 return self.spdmm(x)
         else:
-            raise RuntimeError(f'invalid tensor found for sparse multiply: mode {dims} tensor found.')
+            if isinstance(x, torch.Tensor) and x.shape[-2] == self.shape[1]:
+                # If we're multiplying by a 3d or more complex shape, assume this is a batched SPDMM
+                # x should have shape (a_1, a_2, ..., a_k, n, b), where a_1 ... a_k and b are some arbitrary dimensions
+                ndim = x.ndim
+
+                # First, transpose to shape (n, a_1, a_2, ..., a_k, b) then flatten to (n, a_1 * a_2 * ... a_k * b)
+                x_tr = torch.transpose(x, 0, ndim-2)
+                x_fl = torch.flatten(x_tr, 1)
+
+                # Now, batch multiply
+                y_fl = self.spdmm(x_fl)
+
+                # Reshape and transpose back to correct shape
+                y_tr = y_fl.reshape(x_tr.shape)
+                return torch.transpose(y_tr, 0, ndim-2)
+            elif torch.any(torch.tensor(x.shape) == 1):
+                # If the shapes don't line up for batch multiplication, try to squeeze and try again.
+                return self.__matmul__(torch.squeeze(x))
+            else:
+                # Otherwise, error out.
+                raise RuntimeError(f'invalid tensor found for sparse multiply: mode {dims} tensor found.  Trying to multiply {self.shape} sparse matrix by {x.shape} tensor.')
 
     def to_dense(self):
         '''
