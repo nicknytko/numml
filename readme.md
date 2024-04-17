@@ -30,14 +30,12 @@ Note that the test cases will assume you are running on a machine with CUDA inst
 
 [Optimized Sparse Matrix Operations for Reverse Mode Automatic Differentiation](https://arxiv.org/abs/2212.05159)
 ```
-@misc{NytkoSparse2022,
-  doi = {10.48550/ARXIV.2212.05159},
-  url = {https://arxiv.org/abs/2212.05159},
-  author = {Nytko, Nicolas and Taghibakhshi, Ali and Zaman, Tareq Uz and MacLachlan, Scott and Olson, Luke N. and West, Matt},
-  keywords = {Machine Learning (cs.LG), Mathematical Software (cs.MS), Numerical Analysis (math.NA), FOS: Computer and information sciences, FOS: Computer and information sciences, FOS: Mathematics, FOS: Mathematics},
-  title = {Optimized Sparse Matrix Operations for Reverse Mode Automatic Differentiation},
-  publisher = {arXiv},
-  year = {2022},
-  copyright = {Creative Commons Attribution 4.0 International}
+@misc{nytko2023optimized,
+      title={Optimized Sparse Matrix Operations for Reverse Mode Automatic Differentiation}, 
+      author={Nicolas Nytko and Ali Taghibakhshi and Tareq Uz Zaman and Scott MacLachlan and Luke N. Olson and Matt West},
+      year={2023},
+      eprint={2212.05159},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
 }
 ```
