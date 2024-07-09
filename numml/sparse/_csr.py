@@ -360,6 +360,11 @@ class spdmm(torch.autograd.Function):
         ctx.save_for_backward(A_data, A_indices, A_indptr, B)
         ctx.A_shape = A_shape
 
+        if A_data.type() != B.type():
+            raise RuntimeError(f'Matrices should be same data type, got {A_data.type()} and {B.type()}, respectively.')
+        if (A_shape[1] != B.shape[0]):
+            raise RuntimeError(f'Incompatible matrix shapes for multiplication.  Got {A_shape} and {B.shape}.')
+
         with Profiler('spdmm forward'):
             C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
                                               A_data, A_indices, A_indptr, B)
@@ -460,7 +465,8 @@ class spdiag(torch.autograd.Function):
 
 
 def eye(N, k=0, dtype=torch.float32, device='cpu'):
-    assert(abs(k) < N)
+    if abs(k) >= N:
+        raise RuntimeError(f'Specified bandwidth for eye() is larger than matrix size.  Got k={abs(k)}, N={N}.')
 
     N_k = N - abs(k)
     rows = None
@@ -644,6 +650,9 @@ class SparseCSRTensor(object):
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
 
     def spmv(self, x):
+        if self.shape[1] != torch.numel(x):
+            raise RuntimeError(f'Number of columns of tensor must equal number of rows of vector.  Got shapes: {self.shape} and {x.shape}')
+
         y = spgemv.apply(self.shape, self.data, self.indices, self.indptr, x.squeeze())
         y = utils.unsqueeze_like(y, x)
         return y
@@ -671,14 +680,11 @@ class SparseCSRTensor(object):
         return spla.sptrsv.apply(self.shape, self.data, self.indices, self.indptr, not upper, unit, b)
 
     def spspmm(self, othr):
-        assert(self.shape[1] == othr.shape[0])
-
         C_shape, C_data, C_indices, C_indptr = spgemm.apply(self.shape, self.data, self.indices, self.indptr,
                                                             othr.shape, othr.data, othr.indices, othr.indptr)
         return SparseCSRTensor((C_data, C_indices, C_indptr), C_shape)
 
     def spdmm(self, othr):
-        assert(self.shape[1] == othr.shape[0])
         return spdmm.apply(self.shape, self.data, self.indices, self.indptr, othr)
 
     def __matmul__(self, x):
@@ -878,7 +884,8 @@ class SparseCSRTensor(object):
         if SparseCSRTensor._isscalar(othr):
             return SparseCSRTensor((self.data + othr, self.indices, self.indptr), shape=self.shape)
         elif isinstance(othr, SparseCSRTensor):
-            assert(self.shape == othr.shape)
+            if self.shape != othr.shape:
+                raise RuntimeError(f'Incompatible shapes for entrywise addition, got {self.shape} and {othr.shape}, respectively.')
 
             C = splincomb.apply(self.shape,
                                 torch.tensor(1.), self.data, self.indices, self.indptr,
@@ -891,7 +898,8 @@ class SparseCSRTensor(object):
         if SparseCSRTensor._isscalar(othr):
             return SparseCSRTensor((self.data + othr, self.indices, self.indptr), shape=self.shape)
         elif isinstance(othr, SparseCSRTensor):
-            assert(self.shape == othr.shape)
+            if self.shape != othr.shape:
+                raise RuntimeError(f'Incompatible shapes for entrywise subtraction, got {self.shape} and {othr.shape}, respectively.')
 
             C = splincomb.apply(self.shape,
                                 torch.tensor(1.) , self.data, self.indices, self.indptr,
