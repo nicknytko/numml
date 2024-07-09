@@ -762,6 +762,25 @@ class SparseCSRTensor(object):
         row_i = row_i.to(self.device)
         return torch.sparse_coo_tensor(torch.row_stack((row_i, self.indices)), self.data, self.shape, device=self.device)
 
+    def tocoo(self):
+        '''
+        Converts the Torch CSR representation to SciPy sparse COO.
+        Gradient information on the data will be lost, if it exists.
+
+        Returns
+        -------
+        csr : scipy.sparse.csr_matrix
+          SciPy sparse CSR output
+        '''
+        # take advantage of the fact that sorted COO and CSR have entries in the same order
+        row_i = np.empty(self.nnz, dtype=np.int32)
+        for i in range(self.shape[0]):
+            row_i[self.indptr[i]:self.indptr[i+1]] = i
+        row_i = row_i
+        col_i = self.indices.numpy().astype(np.int32)
+        return sci_sp.coo_matrix((self.data.detach().numpy(), (row_i, col_i)), shape=self.shape)
+
+
     def to_scipy_csr(self):
         '''
         Converts the Torch CSR representation to SciPy sparse CSR.
@@ -773,8 +792,14 @@ class SparseCSRTensor(object):
           SciPy sparse CSR output
         '''
 
-        return sci_sp.csr_matrix((self.data.cpu().detach().double().numpy(),
+        return sci_sp.csr_matrix((self.data.cpu().detach().numpy(),
                                   self.indices.cpu().numpy(), self.indptr.cpu().numpy()), self.shape)
+
+    def tocsr(self):
+        '''
+        Alias for to_scipy_csr()
+        '''
+        return self.to_scipy_csr()
 
     def to_cupy_csr(self, device=None):
         '''
