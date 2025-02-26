@@ -19,7 +19,7 @@ FUNC_IMPL_CPU(torch::Tensor,
 
     torch::Tensor Ax = torch::empty({A_rows}, options);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spgemv_forward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_col_ind.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_rowptr.accessor<int64_t, 1>();
@@ -47,7 +47,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     torch::Tensor grad_A = torch::empty_like(A_data);
     torch::Tensor grad_x = torch::zeros_like(x);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemv_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spgemv_backward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_col_ind.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_rowptr.accessor<int64_t, 1>();
@@ -134,7 +134,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     torch::Tensor C_indices;
     torch::Tensor C_indptr;
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spgemm_forward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -226,7 +226,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     torch::Tensor grad_A = torch::empty_like(A_data);
     torch::Tensor grad_B = torch::zeros_like(B_data);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spgemm_backward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -322,7 +322,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     torch::Tensor At_indices = torch::empty(nnz, torch::TensorOptions().dtype(torch::kLong));
     torch::Tensor At_to_A_idx = torch::empty(nnz, torch::TensorOptions().dtype(torch::kLong));
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_transpose_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_transpose_forward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -371,7 +371,7 @@ FUNC_IMPL_CPU(torch::Tensor,
               torch::Tensor grad_At, torch::Tensor At_to_A_idx) {
     torch::Tensor grad_A = torch::empty_like(grad_At);
 
-    AT_DISPATCH_FLOATING_TYPES(grad_At.type(), "csr_transpose_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(grad_At.scalar_type(), "csr_transpose_backward_cpu", ([&] {
         const auto grad_At_acc = grad_At.accessor<scalar_t, 1>();
         const auto At_to_A_idx_acc = At_to_A_idx.accessor<int64_t, 1>();
         auto grad_A_acc = grad_A.accessor<scalar_t, 1>();
@@ -400,7 +400,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     torch::Tensor C_indices_tens;
     torch::Tensor C_indptr_tens;
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splincomb_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "splincomb_forward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -489,7 +489,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     torch::Tensor grad_A = torch::empty_like(A_data);
     torch::Tensor grad_B = torch::empty_like(B_data);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splincomb_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "splincomb_backward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -576,7 +576,7 @@ FUNC_IMPL_CPU(torch::Tensor,
         .device(A_data.device().type(), A_data.device().index());
     torch::Tensor C = torch::empty({C_rows, C_cols}, scalar_tens_opts);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spdmm_forward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -610,7 +610,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     torch::Tensor grad_A = torch::empty_like(A_data);
     torch::Tensor grad_B = torch::zeros_like(B);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spdmm_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spdmm_backward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -661,7 +661,7 @@ FUNC_IMPL_CPU(torch::Tensor,
         .device(A_data.device().type(), A_data.device().index());
     torch::Tensor x_dbl = torch::empty({A_rows}, options);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "sptrsv_forward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -739,7 +739,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     /* Compute grad_A = -grad_B x^T (*) mask(A) */
     torch::Tensor grad_A_data = torch::empty_like(A_data);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "sptrsv_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "sptrsv_backward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -863,7 +863,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     /* Pre-define our return transposed types since we can't return from inside the lambda */
     torch::Tensor AsT_indptr, AsT_indices, AsT_data;
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splu_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "splu_cpu", ([&] {
         const auto As_indptr_acc = As_indptr.accessor<int64_t, 1>();
         auto As_indices_acc = As_indices.accessor<int64_t, 1>();
         auto As_data_acc = As_data.accessor<scalar_t, 1>();
@@ -1028,7 +1028,7 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
 
     /* grad_A = (-grad_b x^T) (*) mask(A) */
     torch::Tensor grad_A_data = torch::empty_like(A_data);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spsolve_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spsolve_backward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -1058,7 +1058,7 @@ FUNC_IMPL_CPU(torch::Tensor,
         .dtype(A_data.dtype());
 
     torch::Tensor A_d = torch::zeros({A_rows, A_cols}, scalar_tens_opts);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_to_dense_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_to_dense_forward_cpu", ([&] {
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -1083,7 +1083,7 @@ FUNC_IMPL_CPU(torch::Tensor,
 
     torch::Tensor grad_A_data = torch::empty_like(A_data);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_to_dense_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_to_dense_backward_cpu", ([&] {
         auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
         const auto A_indptr_acc = A_indptr.accessor<int64_t, 1>();
@@ -1111,7 +1111,7 @@ FUNC_IMPL_CPU(torch::Tensor,
 
     torch::Tensor x = torch::empty({A_rows}, scalar_tens_opts);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_row_sum_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_row_sum_forward_cpu", ([&] {
         auto x_acc = x.accessor<scalar_t, 1>();
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
@@ -1137,7 +1137,7 @@ FUNC_IMPL_CPU(torch::Tensor,
 
     torch::Tensor grad_A_data = torch::empty_like(A_data);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_row_sum_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_row_sum_backward_cpu", ([&] {
         const auto grad_x_acc = grad_x.accessor<scalar_t, 1>();
         auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
@@ -1164,7 +1164,7 @@ FUNC_IMPL_CPU(torch::Tensor,
 
     torch::Tensor x = torch::zeros({A_rows}, scalar_tens_opts);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_extract_diagonal_forward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_extract_diagonal_forward_cpu", ([&] {
         auto x_acc = x.accessor<scalar_t, 1>();
         const auto A_data_acc = A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
@@ -1192,7 +1192,7 @@ FUNC_IMPL_CPU(torch::Tensor,
 
     torch::Tensor grad_A_data = torch::zeros_like(A_data);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "csr_extract_diagonal_backward_cpu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_extract_diagonal_backward_cpu", ([&] {
         const auto grad_x_acc = grad_x.accessor<scalar_t, 1>();
         auto grad_A_data_acc = grad_A_data.accessor<scalar_t, 1>();
         const auto A_indices_acc = A_indices.accessor<int64_t, 1>();
