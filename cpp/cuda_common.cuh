@@ -15,6 +15,32 @@ const int threads_per_block = 512;
 
 /* Helpers */
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
+__device__ double atomicAdd(double* address, double val) {
+    /* atomicAdd on doubles is not implemented on architectures before Pascal.
+     For older cards, implement our own based on this post:
+     https://stackoverflow.com/questions/37566987/cuda-atomicadd-for-doubles-definition-error */
+
+    unsigned long long int* address_ull = (unsigned long long int*) address;
+    unsigned long long int old_val = *address_ull;
+    unsigned long long int new_val;
+
+    do {
+        new_val = old_val;
+        old_val = atomicCAS(address_ull, new_val,
+                __double_as_longlong(val + __longlong_as_double(new_val)));
+    } while (new_val != old_val);
+
+    return __longlong_as_double(old_val);
+}
+
+#define cudaFreeAsyncMaybe(ptr, stream) cudaFree(ptr)
+#define cudaMemsetAsyncMaybe(ptr, v, size, stream) cudaMemset(ptr, v, size)
+#else
+#define cudaFreeAsyncMaybe(ptr, stream) cudaFreeAsync(ptr, stream)
+#define cudaMemsetAsyncMaybe(ptr, v, size, stream) cudaMemsetAsync(ptr, v, size, stream)
+#endif
+
 /** Error handling */
 inline void _cuda_check_err(const cudaError_t err, const char* file, const int line, const char* function) {
     if (err != cudaSuccess) {
