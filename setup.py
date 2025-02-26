@@ -9,7 +9,7 @@ def find_cpp_files(directory, allow_cuda):
         if f.endswith('.cpp') or (allow_cuda and f.endswith('.cu')):
             out.append(os.path.join(directory, f))
         elif os.path.isdir(f):
-            out = out + find_cpp_files(os.path.join(directory, f))
+            out = out + find_cpp_files(os.path.join(directory, f), allow_cuda)
     return out
 
 # Detect if we have cuda installed and compile accordingly
@@ -37,13 +37,8 @@ else:
                                '-O2'
                            ])
 
-setup(name='numml',
-      version='0.0.1',
-      ext_modules=[native_ext],
+setup(ext_modules=[native_ext],
       cmdclass={
           'build_ext': BuildExtension
       },
-      author='Nicolas Nytko',
-      author_email='nnytko2@illinois.edu',
-      packages=['numml', 'numml.sparse']
 )

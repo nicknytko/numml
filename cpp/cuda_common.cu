@@ -19,7 +19,7 @@ void lexsort_coo_ijv(torch::Tensor& Bhat_I,
     const int64_t Bhat_total_nnz = Bhat_I.size(0);
 
     /* ...permute entries into their correct positions */
-    AT_DISPATCH_FLOATING_TYPES(Bhat_V.type(), "lexsort_coo_ijv", [&] {
+    AT_DISPATCH_FLOATING_TYPES(Bhat_V.scalar_type(), "lexsort_coo_ijv", [&] {
         cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             Bhat_total_nnz, tensor_acc(Bhat_I, int64_t), tensor_acc(i_temp, int64_t), tensor_acc(argsort, int64_t), true);
         cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
@@ -39,7 +39,7 @@ void lexsort_coo_ijv(torch::Tensor& Bhat_I,
     argsort = std::get<1>(i_temp.reshape({1, -1}).sort(true, -1, false)).flatten();
 
     /* ...and again permute entries into correct spots */
-    AT_DISPATCH_FLOATING_TYPES(Bhat_V.type(), "lexsort_coo_ijv", [&] {
+    AT_DISPATCH_FLOATING_TYPES(Bhat_V.scalar_type(), "lexsort_coo_ijv", [&] {
         cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             Bhat_total_nnz, tensor_acc(i_temp, int64_t), tensor_acc(Bhat_I, int64_t), tensor_acc(argsort, int64_t), true);
         cuda_kernel_tensor_permute<<<(Bhat_total_nnz + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
