@@ -1,0 +1,30 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+  "setuptools>=42",
+  "torch",
+]
+
+[project]
+name = "numml"
+authors = [
+  {name="Nicolas Nytko", email="nnytko2@illinois.edu"},
+  {name="Luke Olson"},
+]
+description = "A library for PyTorch providing sparse, differentiable CSR support." 
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+  "torch",
+  "numpy",
+]
+dynamic = ["version", "readme"]
+
+[tool.setuptools]
+packages=["numml", "numml.sparse"]
+
+[tool.setuptools.dynamic]
+version = {attr = "numml.__version__"}
+readme = {file = "readme.md"}
