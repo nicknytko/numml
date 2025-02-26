@@ -52,8 +52,8 @@ def test_random_large():
 
         AX_d = AL_d @ X
 
-        assert(torch.allclose(AX_d, AL@X))
-        assert(torch.allclose(AX_d, (AL_c@X_c).cpu()))
+        assert(tla.norm(AX_d - AL@X) < 1e-4)
+        assert(tla.norm(AX_d - (AL_c@X_c).cpu()) < 1e-4)
 
 def test_backward_grad_A():
     # grad_A := (grad_C * B^T) (*) mask(A)

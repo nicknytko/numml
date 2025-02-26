@@ -148,7 +148,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
         /* We'll create a temporary array to store outputs to and simplify things */
         scalar_t* grad_x_ary = nullptr;
         cudaMalloc(&grad_x_ary, A_cols * sizeof(scalar_t));
-        cudaMemsetAsync(grad_x_ary, 0, A_cols * sizeof(scalar_t), main_stream);
+        cudaMemsetAsyncMaybe(grad_x_ary, 0, A_cols * sizeof(scalar_t), main_stream);
 
         const int grad_x_threads = A_rows;
         const dim3 grad_x_blocks((grad_x_threads + threads_per_block - 1) / threads_per_block, 1);
@@ -250,8 +250,8 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     int64_t* At_indptr_tmp;
     cuda_check_err(cudaMalloc(&At_indptr_tmp, A_columns * sizeof(int64_t)));
     cuda_check_err(cudaMalloc(&At_indptr_raw, (A_columns + 1) * sizeof(int64_t)));
-    cuda_check_err(cudaMemsetAsync(At_indptr_tmp, 0, A_columns * sizeof(int64_t), main_stream));
-    cuda_check_err(cudaMemsetAsync(At_indptr_raw, 0, sizeof(int64_t), main_stream)); /* Zero out first entry. */
+    cuda_check_err(cudaMemsetAsyncMaybe(At_indptr_tmp, 0, A_columns * sizeof(int64_t), main_stream));
+    cuda_check_err(cudaMemsetAsyncMaybe(At_indptr_raw, 0, sizeof(int64_t), main_stream)); /* Zero out first entry. */
 
     /* Compute number of nonzeros per column of A */
     cuda_kernel_csr_nnz_per_col<<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
@@ -261,7 +261,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
 
     /* Now, compute the cumulative sum of nnz to get starting rowptrs of A^T */
     cub_cumsum(At_indptr_tmp, At_indptr_raw + 1, A_columns, main_stream);
-    cuda_check_err(cudaFreeAsync(At_indptr_tmp, main_stream));
+    cuda_check_err(cudaFreeAsyncMaybe(At_indptr_tmp, main_stream));
     At_indptr = torch::from_blob(At_indptr_raw, { static_cast<int64_t>(A_columns + 1) }, cudaFree, int_tens_opts);
 
     /* Move data values into their correct spots */
@@ -807,7 +807,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
        torch doesn't have a native way to do this for tensor accessors */
     bool* value_available;
     cuda_check_err(cudaMalloc(&value_available, sizeof(bool) * A_rows));
-    cuda_check_err(cudaMemsetAsync(value_available, 0, sizeof(bool) * A_rows, main_stream));
+    cuda_check_err(cudaMemsetAsyncMaybe(value_available, 0, sizeof(bool) * A_rows, main_stream));
 
     double* x_raw;
     cuda_check_err(cudaMalloc(&x_raw, sizeof(double) * A_rows));
@@ -825,7 +825,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
     }));
     cuda_check_kernel_launch_err();
 
-    cuda_check_err(cudaFreeAsync(value_available, main_stream));
+    cuda_check_err(cudaFreeAsyncMaybe(value_available, main_stream));
     x_dbl = torch::from_blob(x_raw, { static_cast<int64_t>(A_rows) }, cudaFree, options);
     return x_dbl.to(A_data.dtype());
 }
@@ -1196,9 +1196,9 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     cuda_check_kernel_launch_err();
 
     /* From the row nnz, compute row pointers */
-    cuda_check_err(cudaMemsetAsync(As_row_indptr_raw, 0, sizeof(int64_t), main_stream));
+    cuda_check_err(cudaMemsetAsyncMaybe(As_row_indptr_raw, 0, sizeof(int64_t), main_stream));
     cub_cumsum(As_row_nnz, As_row_indptr_raw + 1, A_rows, main_stream);
-    cuda_check_err(cudaFreeAsync(As_row_nnz, main_stream));
+    cuda_check_err(cudaFreeAsyncMaybe(As_row_nnz, main_stream));
 
     /* Allocate storage for the data and row indices arrays */
     int64_t As_nnz;
@@ -1214,9 +1214,9 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             vert_fill, vert_queue, vert_mask, tensor_acc(As_data, scalar_t), tensor_acc(As_indices, int64_t), As_row_indptr_raw);
     }));
     cuda_check_kernel_launch_err();
-    cuda_check_err(cudaFreeAsync(vert_fill, main_stream));
-    cuda_check_err(cudaFreeAsync(vert_queue, main_stream));
-    cuda_check_err(cudaFreeAsync(vert_mask, main_stream));
+    cuda_check_err(cudaFreeAsyncMaybe(vert_fill, main_stream));
+    cuda_check_err(cudaFreeAsyncMaybe(vert_queue, main_stream));
+    cuda_check_err(cudaFreeAsyncMaybe(vert_mask, main_stream));
 
     /* Compute the transpose/csc representation of As so that we have easy column access. */
     auto AsT = csr_transpose_forward_cuda(A_rows, A_cols, As_data, As_indices, As_indptr);
@@ -1235,7 +1235,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
             tensor_acc(AsT_data, scalar_t), tensor_acc(AsT_indices, int64_t), tensor_acc(AsT_indptr, int64_t), U_col_nnz);
     }));
     cuda_check_kernel_launch_err();
-    cuda_check_err(cudaFreeAsync(U_col_nnz, main_stream));
+    cuda_check_err(cudaFreeAsyncMaybe(U_col_nnz, main_stream));
 
     /* Transpose back into CSR format */
     auto As_f = csr_transpose_forward_cuda(A_cols, A_rows, AsT_data, AsT_indices, AsT_indptr);
