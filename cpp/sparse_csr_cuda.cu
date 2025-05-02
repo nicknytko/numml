@@ -8,6 +8,7 @@
 #include <tuple>
 #include <iostream>
 
+#include "config.hpp"
 #include "cuda_common.cuh"
 #include "sparse_csr.hpp"
 
@@ -300,12 +301,13 @@ FUNC_IMPL_CUDA(torch::Tensor,
  *
  * Indexed on rows of the output.
  */
-__global__ void cuda_kernel_splincomb_nnz_per_row(int rows, int cols,
-                                                  const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-                                                  const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-                                                  const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
-                                                  const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
-                                                  torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> nnz_per_row) {
+__global__ void cuda_kernel_splincomb_nnz_per_row(
+    int rows, int cols,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
+    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> nnz_per_row) {
 
     int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows) {
@@ -357,18 +359,19 @@ __global__ void cuda_kernel_splincomb_nnz_per_row(int rows, int cols,
  * Indexed on rows of the output.
  */
 template <typename scalar_t>
-__global__ void cuda_kernel_splincomb(int rows, int cols,
-                                      scalar_t alpha, scalar_t beta,
-                                      torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
-                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-                                      torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> B_data,
-                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
-                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
-                                      const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> cum_nnz_per_row,
-                                      torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> C_data,
-                                      torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indices,
-                                      torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr) {
+__global__ void cuda_kernel_splincomb(
+    int rows, int cols,
+    scalar_t alpha, scalar_t beta,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> B_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> B_indptr,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> cum_nnz_per_row,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> C_data,
+    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indices,
+    torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr) {
 
     int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows) {
@@ -471,14 +474,15 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
 }
 
 template <typename scalar_t>
-__global__ void cuda_kernel_splincomb_backward(int rows, int cols,
-                                               scalar_t scalar,
-                                               const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> gC_data,
-                                               const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indices,
-                                               const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr,
-                                               torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> gA_data,
-                                               const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-                                               const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
+__global__ void cuda_kernel_splincomb_backward(
+    int rows, int cols,
+    scalar_t scalar,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> gC_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> C_indptr,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> gA_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr) {
 
     int64_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows) {
@@ -544,12 +548,13 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
  * Indexed on blocks of the output.
  */
 template <typename scalar_t>
-__global__ void cuda_kernel_spdmm_forward(int A_rows, int A_cols, int B_rows, int B_cols,
-                                          const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
-                                          const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-                                          const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-                                          const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> B,
-                                          torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> C) {
+__global__ void cuda_kernel_spdmm_forward(
+    int A_rows, int A_cols, int B_rows, int B_cols,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> B,
+    torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> C) {
 
     const int64_t c_i = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t c_j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -608,12 +613,13 @@ FUNC_IMPL_CUDA(torch::Tensor,
  * Indexed on rows of A.
  */
 template <typename scalar_t>
-__global__ void cuda_kernel_spdmm_backward_masked_A(const int64_t A_rows, const int64_t A_cols,
-                                                    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_A_data,
-                                                    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-                                                    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-                                                    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> B,
-                                                    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> grad_C) {
+__global__ void cuda_kernel_spdmm_backward_masked_A(
+    const int64_t A_rows, const int64_t A_cols,
+    torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> grad_A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> B,
+    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> grad_C) {
 
     int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (out_idx >= grad_A_data.size(0)) {
@@ -644,6 +650,34 @@ __global__ void cuda_kernel_spdmm_backward_masked_A(const int64_t A_rows, const 
     grad_A_data[out_idx] = a_ij;
 }
 
+/**
+ * Computes grad_B = (A^T grad_C)
+ *
+ * Indexed on rows of A and columns of grad_C
+ */
+template <typename scalar_t>
+__global__ void cuda_kernel_spdmm_backward_atomic_B(
+    const int64_t A_rows, const int64_t A_cols,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+    torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> grad_B,
+    const torch::PackedTensorAccessor64<scalar_t, 2, torch::RestrictPtrTraits> grad_C) {
+
+    const int64_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (k >= A_rows ||
+        j >= grad_C.size(1)) {
+        return;
+    }
+
+    /* grad_B_{ij} = (A^T C)_{ij} = a_{ki} grad_C_{kj} */
+    for (int64_t k_i = A_indptr[k]; k_i < A_indptr[k + 1]; ++k_i) {
+        const int64_t i = A_indices[k_i];
+        atomicAdd(&(grad_B[i][j]), A_data[k_i] * grad_C[k][j]);
+    }
+}
+
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                spdmm_backward,
                int A_rows, int A_cols,
@@ -654,8 +688,6 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
         .dtype(A_data.dtype())
         .device(A_data.device().type(), A_data.device().index());
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
-
-    // auto start = std::chrono::steady_clock::now();
 
     /* grad_A = (grad_C * B^T) (*) mask(A) */
     torch::Tensor grad_A;
@@ -670,16 +702,23 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
         cuda_check_kernel_launch_err();
     }
 
-    // auto end = std::chrono::steady_clock::now();
-    // std::chrono::duration<double> diff = end - start;
-    // std::cerr << "spdmm_backward grad_A " << diff.count() << std::endl;
-
-    /* grad_B = (A^T * grad_C) */
     torch::Tensor grad_B;
 
-    // start = std::chrono::steady_clock::now();
-
     if (B.requires_grad()) {
+        #if (SPDMM_BACKWARD_ATOMIC_B == 1)
+        grad_B = torch::zeros({A_cols, grad_C.size(1)}, scalar_tens_opts);
+        AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spdmm_backward_cuda", ([&] {
+            const dim3 blocks(
+                (A_rows + threads_per_block_2d - 1) / threads_per_block_2d,
+                (grad_C.size(1) + threads_per_block_2d - 1) / threads_per_block_2d,
+                1);
+            const dim3 threads(threads_per_block_2d, threads_per_block_2d, 1);
+
+            cuda_kernel_spdmm_backward_atomic_B<scalar_t><<<blocks, threads, 0, main_stream>>>(
+                A_rows, A_cols, tensor_acc(A_data, scalar_t), tensor_acc(A_indices, int64_t), tensor_acc(A_indptr, int64_t),
+                tensor_acc_3(grad_B, 2, scalar_t), tensor_acc_3(grad_C, 2, scalar_t));
+        }));
+        #else
         grad_B = torch::empty({A_cols, grad_C.size(1)}, scalar_tens_opts);
         auto At = csr_transpose_forward_cuda(A_rows, A_cols, A_data, A_indices, A_indptr);
         AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spdmm_backward_cuda", ([&] {
@@ -687,17 +726,15 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
                               (grad_C.size(1) + threads_per_block_2d - 1) / threads_per_block_2d,
                               1);
             const dim3 threads(threads_per_block_2d, threads_per_block_2d, 1);
+
             cuda_kernel_spdmm_forward<scalar_t><<<blocks, threads, 0, main_stream>>>(
                 A_cols, A_rows, grad_C.size(0), grad_C.size(1),
                 tensor_acc(At[0], scalar_t), tensor_acc(At[1], int64_t), tensor_acc(At[2], int64_t),
                 tensor_acc_3(grad_C, 2, scalar_t), tensor_acc_3(grad_B, 2, scalar_t));
         }));
+        #endif
         cuda_check_kernel_launch_err();
     }
-
-    // end = std::chrono::steady_clock::now();
-    // diff = end - start;
-    // std::cerr << "spdmm_backward grad_A " << diff.count() << std::endl;
 
     return {grad_A, grad_B};
 }
@@ -711,14 +748,15 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
  * Indexed on rows of L.
  */
 template <typename scalar_t>
-__global__ void cuda_kernel_sptrsv_forward_lower(const int64_t A_rows, const int64_t A_cols,
-                                                 const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
-                                                 const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-                                                 const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-                                                 const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> b,
-                                                 volatile double* __restrict__ x,
-                                                 bool unit,
-                                                 volatile bool* __restrict__ value_available) {
+__global__ void cuda_kernel_sptrsv_forward_lower(
+    const int64_t A_rows, const int64_t A_cols,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> b,
+    volatile double* __restrict__ x,
+    bool unit,
+    volatile bool* __restrict__ value_available) {
 
     int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= A_rows) {
@@ -752,14 +790,15 @@ __global__ void cuda_kernel_sptrsv_forward_lower(const int64_t A_rows, const int
 
 
 template <typename scalar_t>
-__global__ void cuda_kernel_sptrsv_forward_upper(const int64_t A_rows, const int64_t A_cols,
-                                                 const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
-                                                 const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
-                                                 const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
-                                                 const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> b,
-                                                 volatile double* __restrict__ x,
-                                                 bool unit,
-                                                 volatile bool* __restrict__ value_available) {
+__global__ void cuda_kernel_sptrsv_forward_upper(
+    const int64_t A_rows, const int64_t A_cols,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> A_data,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indices,
+    const torch::PackedTensorAccessor64<int64_t, 1, torch::RestrictPtrTraits> A_indptr,
+    const torch::PackedTensorAccessor64<scalar_t, 1, torch::RestrictPtrTraits> b,
+    volatile double* __restrict__ x,
+    bool unit,
+    volatile bool* __restrict__ value_available) {
 
     int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= A_rows) {

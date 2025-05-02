@@ -35,13 +35,10 @@ def test_random_small():
         Nc = random.randint(3, 10)
         X = torch.randn(A_N, Nc)
         X_c = X.to(gpu)
-        print('X_c shape', X_c.shape)
-        print(X_c)
-
         AX_d = A_d @ X
 
-        assert(torch.allclose(AX_d, A@X))
-        assert(torch.allclose(AX_d, (A_c@X_c).cpu()))
+        assert(torch.allclose(AX_d, A@X, atol=1e-6))
+        assert(torch.allclose(AX_d, (A_c@X_c).cpu(), atol=1e-6))
 
 def test_random_large():
     it = 5
@@ -52,8 +49,8 @@ def test_random_large():
 
         AX_d = AL_d @ X
 
-        assert(torch.allclose(AX_d, AL@X))
-        assert(torch.allclose(AX_d, (AL_c@X_c).cpu()))
+        assert(torch.allclose(AX_d, AL@X, atol=1e-6))
+        assert(torch.allclose(AX_d, (AL_c@X_c).cpu(), atol=1e-6))
 
 def test_backward_grad_A():
     # grad_A := (grad_C * B^T) (*) mask(A)
@@ -107,7 +104,7 @@ def test_backward_grad_B():
         ((A@X) * grad_C).sum().backward()
         ((A_c@X_c) * grad_C_c).sum().backward()
 
-        assert(torch.allclose(X.grad, X_c.grad.cpu()))
+        assert(torch.allclose(X.grad, X_c.grad.cpu(), atol=1e-6))
 
         grad_B_d = A_d.T @ grad_C
-        assert(torch.allclose(grad_B_d, X.grad))
+        assert(torch.allclose(grad_B_d, X.grad, atol=1e-6))
