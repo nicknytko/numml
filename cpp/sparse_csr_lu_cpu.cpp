@@ -8,8 +8,9 @@
 #include "superlu.hpp"
 #endif
 
-int64_t cpu_indices_binsearch(int64_t i_start, int64_t i_end, const int64_t i_search,
-                              const torch::TensorAccessor<int64_t, 1, torch::DefaultPtrTraits>& indices) {
+int64_t cpu_indices_binsearch(
+    int64_t i_start, int64_t i_end, const int64_t i_search,
+    const torch::TensorAccessor<int64_t, 1, torch::DefaultPtrTraits>& indices) {
     int64_t i_mid;
     while (i_start <= i_end) {
         i_mid = (i_start + i_end) / 2;
@@ -26,8 +27,9 @@ int64_t cpu_indices_binsearch(int64_t i_start, int64_t i_end, const int64_t i_se
 
 
 std::vector<torch::Tensor>
-splu_cpu_fill2(int A_rows, int A_cols,
-               torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+splu_cpu_fill2(
+    int A_rows, int A_cols,
+    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
 
     auto int_tens_opts = torch::TensorOptions()
         .dtype(torch::kInt64)
@@ -113,7 +115,7 @@ splu_cpu_fill2(int A_rows, int A_cols,
     /* Pre-define our return transposed types since we can't return from inside the lambda */
     torch::Tensor AsT_indptr, AsT_indices, AsT_data;
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splu_cpu_fill2", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "splu_cpu_fill2", ([&] {
         const auto As_indptr_acc = As_indptr.accessor<int64_t, 1>();
         auto As_indices_acc = As_indices.accessor<int64_t, 1>();
         auto As_data_acc = As_data.accessor<scalar_t, 1>();
@@ -268,8 +270,9 @@ splu_cpu_fill2(int A_rows, int A_cols,
 
 #if (SUPERLU_ENABLED==1)
 std::vector<torch::Tensor>
-splu_cpu_superlu(int A_rows, int A_cols,
-                 torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+splu_cpu_superlu(
+    int A_rows, int A_cols,
+    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
     auto int_tens_opts = torch::TensorOptions()
         .dtype(torch::kInt64)
         .device(A_data.device().type(), A_data.device().index());
@@ -279,7 +282,7 @@ splu_cpu_superlu(int A_rows, int A_cols,
         .device(A_data.device().type(), A_data.device().index());
 
     torch::Tensor Pr, Pc, As_data, As_indices, As_indptr, AsT_data, AsT_indices, AsT_indptr;
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "splu_cpu_superlu", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "splu_cpu_superlu", ([&] {
         SuperLUMatrix<scalar_t> A_slu = torch_to_superlu_mat<scalar_t>(A_rows, A_cols, A_data, A_indices, A_indptr);
         auto superlu_out = superlu_factorize(A_slu);
         AsT_data = superlu_out[0];
@@ -297,16 +300,18 @@ splu_cpu_superlu(int A_rows, int A_cols,
     return {Pc, Pr, As_data, As_indices, As_indptr, AsT_data, AsT_indices, AsT_indptr};
 }
 #else
-splu_cpu_superlu(int A_rows, int A_cols,
-                 torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+splu_cpu_superlu(
+    int A_rows, int A_cols,
+    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
     return {};
 }
 #endif
 
-FUNC_IMPL_CPU(std::vector<torch::Tensor>,
-              splu,
-              int A_rows, int A_cols,
-              torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
+FUNC_IMPL_CPU(
+    std::vector<torch::Tensor>,
+    splu,
+    int A_rows, int A_cols,
+    torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
 
 #if (SUPERLU_ENABLED==1)
     return splu_cpu_superlu(A_rows, A_cols, A_data, A_indices, A_indptr);

@@ -23,6 +23,7 @@ cxx_args = [
     '-std=c++17',
     '-w'
 ]
+ld_args = []
 libraries = []
 
 # Platform specific build options
@@ -30,7 +31,10 @@ has_superlu = False
 
 if platform.system() == 'Darwin':
     macos_include_path = os.path.join('/', 'opt', 'homebrew', 'include')
+    macos_lib_path = os.path.join('/', 'opt', 'homebrew', 'lib')
+
     cxx_args.append(f'-I{macos_include_path}')
+    ld_args.append(f'-L{macos_lib_path}')
     has_superlu = os.path.exists(os.path.join(macos_include_path, 'supermatrix.h'))
 
 elif platform.system() == 'Linux':
@@ -93,6 +97,7 @@ else:
         name='numml_torch_cpp',
         sources=find_cpp_files('cpp', allow_cuda=False),
         extra_compile_args=cxx_args,
+        extra_link_args=ld_args,
         libraries=libraries
     )
 
