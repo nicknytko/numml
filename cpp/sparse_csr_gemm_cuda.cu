@@ -261,7 +261,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     torch::Tensor Chat_I = torch::empty({Chat_total_nnz}, int_tens_opts);
     torch::Tensor Chat_J = torch::empty({Chat_total_nnz}, int_tens_opts);
     torch::Tensor Chat_V = torch::empty({Chat_total_nnz}, scalar_tens_opts);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_forward_cuda", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spgemm_forward_cuda", ([&] {
         cuda_kernel_Chat_expansion<scalar_t><<<(C_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             C_rows,
             tensor_acc(A_data, scalar_t), tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),
@@ -290,7 +290,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     torch::Tensor C_data = torch::empty({C_total_nnz}, scalar_tens_opts);
     torch::Tensor C_indices = torch::empty({C_total_nnz}, int_tens_opts);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_forward_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spgemm_forward_cuda", [&] {
         cuda_kernel_assemble_C<<<(C_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             C_rows,
             tensor_acc(Chat_V, scalar_t), tensor_acc(Chat_nnz_cumsum, int64_t), tensor_acc(Chat_J, int64_t),
@@ -698,7 +698,7 @@ static torch::Tensor spgemm_backward_grad_B(torch::Tensor grad_C, torch::Tensor 
     torch::Tensor Bhat_J = torch::empty({Bhat_total_nnz}, int_tens_opts);
     torch::Tensor Bhat_V = torch::empty({Bhat_total_nnz}, scalar_tens_opts);
 
-    AT_DISPATCH_FLOATING_TYPES(grad_C.type(), "spgemm_backward_cuda", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(grad_C.scalar_type(), "spgemm_backward_cuda", ([&] {
         cuda_kernel_AT_Chat_expansion<scalar_t><<<(A_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             A_rows,
             tensor_acc(A_data, scalar_t), tensor_acc(A_indptr, int64_t), tensor_acc(A_indices, int64_t),
@@ -722,7 +722,7 @@ static torch::Tensor spgemm_backward_grad_B(torch::Tensor grad_C, torch::Tensor 
     /* Now, assemble the matrix */
     const int64_t B_total_nnz = B_indptr[B_indptr.size(0) - 1].item<int64_t>();
     torch::Tensor grad_B = torch::zeros({B_total_nnz}, scalar_tens_opts);
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_backward_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spgemm_backward_cuda", [&] {
         cuda_kernel_assemble_C_masked<<<(B_rows + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             B_rows,
             tensor_acc(Bhat_V, scalar_t), tensor_acc(Bhat_nnz_cumsum, int64_t), tensor_acc(Bhat_J, int64_t),
@@ -754,7 +754,7 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
     torch::Tensor grad_A = torch::empty_like(A_data);
 
-    AT_DISPATCH_FLOATING_TYPES(A_data.type(), "spgemm_backward_cuda", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spgemm_backward_cuda", ([&] {
         cuda_kernel_spmatmat_ABt_masked<<<(A_data.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
             C_rows, C_cols, tensor_acc(grad_C, scalar_t), tensor_acc(C_indices, int64_t), tensor_acc(C_indptr, int64_t),
             B_rows, B_cols, tensor_acc(B_data, scalar_t), tensor_acc(B_indices, int64_t), tensor_acc(B_indptr, int64_t),

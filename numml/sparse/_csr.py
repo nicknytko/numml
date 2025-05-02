@@ -360,6 +360,11 @@ class spdmm(torch.autograd.Function):
         ctx.save_for_backward(A_data, A_indices, A_indptr, B)
         ctx.A_shape = A_shape
 
+        if A_data.type() != B.type():
+            raise RuntimeError(f'Matrices should be same data type, got {A_data.type()} and {B.type()}, respectively.')
+        if (A_shape[1] != B.shape[0]):
+            raise RuntimeError(f'Incompatible matrix shapes for multiplication.  Got {A_shape} and {B.shape}.')
+
         with Profiler('spdmm forward'):
             C = numml_torch_cpp.spdmm_forward(A_shape[0], A_shape[1],
                                               A_data, A_indices, A_indptr, B)
@@ -460,7 +465,8 @@ class spdiag(torch.autograd.Function):
 
 
 def eye(N, k=0, dtype=torch.float32, device='cpu'):
-    assert(abs(k) < N)
+    if abs(k) >= N:
+        raise RuntimeError(f'Specified bandwidth for eye() is larger than matrix size.  Got k={abs(k)}, N={N}.')
 
     N_k = N - abs(k)
     rows = None
@@ -644,6 +650,9 @@ class SparseCSRTensor(object):
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
 
     def spmv(self, x):
+        if self.shape[1] != torch.numel(x):
+            raise RuntimeError(f'Number of columns of tensor must equal number of rows of vector.  Got shapes: {self.shape} and {x.shape}')
+
         y = spgemv.apply(self.shape, self.data, self.indices, self.indptr, x.squeeze())
         y = utils.unsqueeze_like(y, x)
         return y
@@ -671,26 +680,34 @@ class SparseCSRTensor(object):
         return spla.sptrsv.apply(self.shape, self.data, self.indices, self.indptr, not upper, unit, b)
 
     def spspmm(self, othr):
-        assert(self.shape[1] == othr.shape[0])
-
         C_shape, C_data, C_indices, C_indptr = spgemm.apply(self.shape, self.data, self.indices, self.indptr,
                                                             othr.shape, othr.data, othr.indices, othr.indptr)
         return SparseCSRTensor((C_data, C_indices, C_indptr), C_shape)
 
     def spdmm(self, othr):
-        assert(self.shape[1] == othr.shape[0])
         return spdmm.apply(self.shape, self.data, self.indices, self.indptr, othr)
 
     def __matmul__(self, x):
         dims = None
         if isinstance(x, torch.Tensor):
-            dims = len(torch.squeeze(x).shape)
+            dims = x.ndim
         elif isinstance(x, SparseCSRTensor):
             dims = 2
         else:
             raise RuntimeError(f'Unknown type for matmul: {type(x)}.')
 
-        if dims == 1:
+        if dims == 0:
+            # Multiplication by a scalar, special case depending on what our shape is
+            if self.shape[0] == 1 and self.shape[1] == 1:
+                # 1x1 matrix times scalar -> scalar
+                return self.data * x.item()
+            elif self.shape[0] == 1 or self.shape[1] == 1:
+                # 1xn or nx1 times scalar -> dense vector
+                return self.to_dense() * x.item()
+            else:
+                # mxn times scalar -> sparse matrix
+                return self.__mul__(x.item())
+        elif dims == 1:
             return self.spmv(x)
         elif dims == 2:
             if isinstance(x, SparseCSRTensor):
@@ -698,7 +715,27 @@ class SparseCSRTensor(object):
             elif isinstance(x, torch.Tensor):
                 return self.spdmm(x)
         else:
-            raise RuntimeError(f'invalid tensor found for sparse multiply: mode {dims} tensor found.')
+            if isinstance(x, torch.Tensor) and x.shape[-2] == self.shape[1]:
+                # If we're multiplying by a 3d or more complex shape, assume this is a batched SPDMM
+                # x should have shape (a_1, a_2, ..., a_k, n, b), where a_1 ... a_k and b are some arbitrary dimensions
+                ndim = x.ndim
+
+                # First, transpose to shape (n, a_1, a_2, ..., a_k, b) then flatten to (n, a_1 * a_2 * ... a_k * b)
+                x_tr = torch.transpose(x, 0, ndim-2)
+                x_fl = torch.flatten(x_tr, 1)
+
+                # Now, batch multiply
+                y_fl = self.spdmm(x_fl)
+
+                # Reshape and transpose back to correct shape
+                y_tr = y_fl.reshape(x_tr.shape)
+                return torch.transpose(y_tr, 0, ndim-2)
+            elif torch.any(torch.tensor(x.shape) == 1):
+                # If the shapes don't line up for batch multiplication, try to squeeze and try again.
+                return self.__matmul__(torch.squeeze(x))
+            else:
+                # Otherwise, error out.
+                raise RuntimeError(f'invalid tensor found for sparse multiply: mode {dims} tensor found.  Trying to multiply {self.shape} sparse matrix by {x.shape} tensor.')
 
     def to_dense(self):
         '''
@@ -725,10 +762,30 @@ class SparseCSRTensor(object):
         '''
 
         # take advantage of the fact that sorted COO and CSR have entries in the same order
-        row_i = torch.empty(self.nnz, dtype=long)
+        row_i = torch.empty(self.nnz, dtype=torch.long)
         for i in range(self.shape[0]):
             row_i[self.indptr[i]:self.indptr[i+1]] = i
-        return torch.sparse_coo_tensor(torch.row_stack((row_i, self.indices)), self.data, self.shape)
+        row_i = row_i.to(self.device)
+        return torch.sparse_coo_tensor(torch.row_stack((row_i, self.indices)), self.data, self.shape, device=self.device)
+
+    def tocoo(self):
+        '''
+        Converts the Torch CSR representation to SciPy sparse COO.
+        Gradient information on the data will be lost, if it exists.
+
+        Returns
+        -------
+        csr : scipy.sparse.csr_matrix
+          SciPy sparse CSR output
+        '''
+        # take advantage of the fact that sorted COO and CSR have entries in the same order
+        row_i = np.empty(self.nnz, dtype=np.int32)
+        for i in range(self.shape[0]):
+            row_i[self.indptr[i]:self.indptr[i+1]] = i
+        row_i = row_i
+        col_i = self.indices.numpy().astype(np.int32)
+        return sci_sp.coo_matrix((self.data.detach().numpy(), (row_i, col_i)), shape=self.shape)
+
 
     def to_scipy_csr(self):
         '''
@@ -741,8 +798,14 @@ class SparseCSRTensor(object):
           SciPy sparse CSR output
         '''
 
-        return sci_sp.csr_matrix((self.data.cpu().detach().double().numpy(),
+        return sci_sp.csr_matrix((self.data.cpu().detach().numpy(),
                                   self.indices.cpu().numpy(), self.indptr.cpu().numpy()), self.shape)
+
+    def tocsr(self):
+        '''
+        Alias for to_scipy_csr()
+        '''
+        return self.to_scipy_csr()
 
     def to_cupy_csr(self, device=None):
         '''
@@ -821,7 +884,8 @@ class SparseCSRTensor(object):
         if SparseCSRTensor._isscalar(othr):
             return SparseCSRTensor((self.data + othr, self.indices, self.indptr), shape=self.shape)
         elif isinstance(othr, SparseCSRTensor):
-            assert(self.shape == othr.shape)
+            if self.shape != othr.shape:
+                raise RuntimeError(f'Incompatible shapes for entrywise addition, got {self.shape} and {othr.shape}, respectively.')
 
             C = splincomb.apply(self.shape,
                                 torch.tensor(1.), self.data, self.indices, self.indptr,
@@ -834,7 +898,8 @@ class SparseCSRTensor(object):
         if SparseCSRTensor._isscalar(othr):
             return SparseCSRTensor((self.data + othr, self.indices, self.indptr), shape=self.shape)
         elif isinstance(othr, SparseCSRTensor):
-            assert(self.shape == othr.shape)
+            if self.shape != othr.shape:
+                raise RuntimeError(f'Incompatible shapes for entrywise subtraction, got {self.shape} and {othr.shape}, respectively.')
 
             C = splincomb.apply(self.shape,
                                 torch.tensor(1.) , self.data, self.indices, self.indptr,
