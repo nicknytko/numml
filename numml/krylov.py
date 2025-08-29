@@ -35,7 +35,7 @@ def conjugate_residual(A, b, x=None, M=None, rtol=1e-6, iterations=None):
       Norm of the residual at each iteration, including before the first iteration.
     '''
 
-    assert(A.shape[0] == A.shape[1])
+    assert A.shape[0] == A.shape[1]
 
     r = None
     if x is None:
@@ -80,6 +80,87 @@ def conjugate_residual(A, b, x=None, M=None, rtol=1e-6, iterations=None):
     return x, res_hist
 
 
+def generalized_conjugate_residual(A, b, x=None, M=None, rtol=1e-6, iterations=None):
+    '''
+    Solves the matrix equation
+
+    Ax = b
+
+    for general A using the Generalized Conjugate Residual (GCR) method (Saad 2003)
+
+    Parameters
+    ----------
+    A : numml.sparse.SparseCSRTensor or numml.sparse.LinearOperator
+      System matrix
+    b : torch.Tensor
+      Right-hand-side vector
+    x : torch.Tensor
+      Initial guess to the solution.  If not given, will default to zero.
+    M : numml.sparse.SparseCSRTensor or numml.sparse.LinearOperator
+      Preconditioner, if it exists.  If not given this will behave like the identity.
+    rtol : float
+      Relative tolerance for stopping condition.  Will terminate the algorithm when
+      ||b - Ax|| / ||b|| <= rtol
+
+    Returns
+    -------
+    x_sol : torch.Tensor
+      Approximate solution to the matrix equation.
+    res_hist : list of torch.Tensor
+      Norm of the residual at each iteration, including before the first iteration.
+    '''
+
+    assert A.shape[0] == A.shape[1]
+
+    r = None
+    if x is None:
+        x = torch.zeros(A.shape[1], device=b.device)
+        r = b.clone()
+    else:
+        r = b - A @ x
+
+    if M is None:
+        # No preconditioner means we use the identity
+        M = sp.LinearOperator(A.shape, lambda x: x.clone(), lambda x: x.clone())
+
+    r = M @ r
+    p = r.clone()
+    MAp = M@(A@p)
+
+    p_list = [p]
+    MAp_list = [MAp]
+
+    nrm_b = tla.norm(M@b)
+    it = 0
+    res_hist = [tla.norm(r)]
+
+    while tla.norm(r) / nrm_b > rtol:
+        alpha = (r @ MAp) / (MAp @ MAp)
+        x = x + alpha * p
+
+        r_new = r - alpha * MAp
+        MAr_new = M @ (A @ r_new)
+
+        p_new = r_new.clone()
+        for i in range(it+1):
+          beta = -(MAr_new @ MAp_list[i]) / (MAp_list[i] @ MAp_list[i])
+          p_new += beta*p_list[i]
+
+        p = p_new
+        MAp = M@(A@p)
+        p_list.append(p)
+        MAp_list.append(MAp)
+        r = r_new
+
+        res_hist.append(tla.norm(r))
+
+        it += 1
+        if iterations is not None and it >= iterations:
+            break
+
+    return x, res_hist
+
+
 def conjugate_gradient(A, b, x=None, M=None, rtol=1e-6, iterations=None):
     '''
     Solves the matrix equation
@@ -112,7 +193,7 @@ def conjugate_gradient(A, b, x=None, M=None, rtol=1e-6, iterations=None):
       Norm of the residual at each iteration, including before the first iteration.
     '''
 
-    assert(A.shape[0] == A.shape[1])
+    assert A.shape[0] == A.shape[1]
 
     r = None
     if x is None:
