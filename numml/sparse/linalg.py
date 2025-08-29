@@ -46,7 +46,7 @@ class sptrsv(torch.autograd.Function):
 
 def splu(A):
     '''
-    Compute the sparse LU factorization of an invertible matrix (without pivoting).
+    Compute the sparse LU factorization of an invertible matrix (with pivoting).
 
     Note that this does not propagate gradient information.  If you need a solve with
     gradients, use spsolve.

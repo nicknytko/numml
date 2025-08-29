@@ -304,6 +304,8 @@ splu_cpu_superlu(
     return {Pc, Pr, As_data, As_indices, As_indptr, AsT_data, AsT_indices, AsT_indptr};
 }
 #else
+#warning Compiling without SuperLU support
+std::vector<torch::Tensor>
 splu_cpu_superlu(
     int A_rows, int A_cols,
     torch::Tensor A_data, torch::Tensor A_indices, torch::Tensor A_indptr) {
