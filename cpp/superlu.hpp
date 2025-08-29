@@ -211,93 +211,6 @@ SuperLUMatrix<T> torch_to_superlu_mat(int rows, int cols,
 }
 
 template<typename T>
-std::vector<torch::Tensor> superlu_to_torch_mat(const SuperLUMatrix<T>& mat) {
-    const int64_t rows = mat.matrix.nrow;
-    const int64_t cols = mat.matrix.ncol;
-
-    int64_t nnz;
-    T* A_data;
-    int64_t* A_indices;
-    int64_t* A_indptr;
-
-    /* Copy data over from the SuperLUMatrix */
-    if (mat.matrix.Stype == superlu_c::SLU_NC) {
-        superlu_c::NCformat* store = static_cast<superlu_c::NCformat*>(mat.matrix.Store);
-        nnz = store->nnz;
-
-        A_data = new T[nnz];
-        A_indices = new int64_t[nnz];
-        A_indptr = new int64_t[cols + 1];
-
-        std::cout << "Num rows " << rows << std::endl;
-        std::cout << "Num cols " << cols << std::endl;
-
-        std::memcpy(A_data, store->nzval, nnz * sizeof(T));
-        for (int64_t i = 0; i < nnz; i++) {
-            A_indices[i] = static_cast<int64_t>(store->rowind[i]);
-        }
-        for (int64_t i = 0; i < cols + 1; i++) {
-            A_indptr[i] = static_cast<int64_t>(store->colptr[i]);
-        }
-    } else if (mat.matrix.Stype == superlu_c::SLU_SC) {
-        superlu_c::SCformat* store = static_cast<superlu_c::SCformat*>(mat.matrix.Store);
-        /* TODO */
-        throw std::runtime_error("Conversion from columnwise supernodal format not implemented.");
-    }
-
-    /* Return torch representations */
-    auto int_tens_opts = torch::TensorOptions()
-        .dtype(torch::kInt64);
-
-    auto scalar_tens_opts = torch::TensorOptions()
-        .dtype(type_to_torch_dtype(typeid(T)));
-
-    torch::Tensor A_data_T = torch::from_blob(A_data, { nnz }, std::free, scalar_tens_opts);
-    torch::Tensor A_indices_T = torch::from_blob(A_indices, { nnz }, std::free, int_tens_opts);
-    torch::Tensor A_indptr_T = torch::from_blob(A_indptr, { cols }, std::free, int_tens_opts);
-
-    return { A_data_T, A_indices_T, A_indptr_T };
-}
-
-template<typename T>
-std::vector<torch::Tensor> superlu_to_torch_mat(SuperLUMatrix<T>&& mat) {
-    const int64_t nnz = mat.matrix.Store.nnz;
-    const int64_t rows = mat.matrix.nrow;
-    const int64_t cols = mat.matrix.ncol;
-
-    int64_t* A_indices = new int64_t[nnz];
-    int64_t* A_indptr = new int64_t[cols + 1];
-
-    for (int64_t i = 0; i < nnz; i++) {
-        A_indices[i] = (int64_t) mat.matrix.Store.rowind[i];
-    }
-    for (int64_t i = 0; i < cols + 1; i++) {
-        A_indptr[i] = (int64_t) mat.matrix.Store.colptr[i];
-    }
-
-    /* Move data over from the SuperLUMatrix */
-    mat.Store.nzval = nullptr;
-    std::free(mat.Store.rowind);
-    mat.Store.rowind = nullptr;
-    std::free(mat.Store.colptr);
-    mat.Store.colptr = nullptr;
-    mat.Store.nnz = 0;
-
-    /* Return torch representations */
-    auto int_tens_opts = torch::TensorOptions()
-        .dtype(torch::kInt64);
-
-    auto scalar_tens_opts = torch::TensorOptions()
-        .dtype(type_to_torch_dtype(typeid(T)));
-
-    torch::Tensor A_data_T = torch::from_blob(mat.matrix.Store.nzval, { nnz }, std::free, scalar_tens_opts);
-    torch::Tensor A_indices_T = torch::from_blob(A_indices, { nnz }, std::free, int_tens_opts);
-    torch::Tensor A_indptr_T = torch::from_blob(A_indptr, { cols }, std::free, int_tens_opts);
-
-    return { A_data_T, A_indices_T, A_indptr_T };
-}
-
-template<typename T>
 struct coo_coordinate_t {
     int64_t row, col;
     T val;
@@ -415,10 +328,6 @@ std::vector<torch::Tensor> superlu_factorize(SuperLUMatrix<T>& A) {
             }
         }
     }
-    // std::sort(out_coo_format.begin(), out_coo_format.end()); /* <-- this doesn't do anything. why? */
-    // for (int64_t i = 0; i < out_coo_format.size(); i++) {
-    //     std::cerr << out_coo_format[i] << std::endl;
-    // }
 
     /** Convert to CSC representation */
     auto int_tens_opts = torch::TensorOptions()

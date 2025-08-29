@@ -283,7 +283,10 @@ splu_cpu_superlu(
 
     torch::Tensor Pr, Pc, As_data, As_indices, As_indptr, AsT_data, AsT_indices, AsT_indptr;
     AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "splu_cpu_superlu", ([&] {
-        SuperLUMatrix<scalar_t> A_slu = torch_to_superlu_mat<scalar_t>(A_rows, A_cols, A_data, A_indices, A_indptr);
+        /* Transpose input, as SuperLU expects column-oriented data */
+        auto AsT = csr_transpose_forward(A_rows, A_cols, A_data, A_indices, A_indptr);
+
+        SuperLUMatrix<scalar_t> A_slu = torch_to_superlu_mat<scalar_t>(A_rows, A_cols, AsT[0], AsT[1], AsT[2]);
         auto superlu_out = superlu_factorize(A_slu);
         AsT_data = superlu_out[0];
         AsT_indices = superlu_out[1];
@@ -291,6 +294,7 @@ splu_cpu_superlu(
         Pc = superlu_out[3];
         Pr = superlu_out[4];
 
+        /* Transpose output back to row oriented */
         auto As = csr_transpose_forward_cpu(A_cols, A_rows, AsT_data, AsT_indices, AsT_indptr);
         As_data = As[0];
         As_indices = As[1];

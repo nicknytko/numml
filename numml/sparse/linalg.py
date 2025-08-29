@@ -87,7 +87,7 @@ class spsolve_fn(torch.autograd.Function):
             numml_torch_cpp.splu(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
 
         y = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, True, True, utils.permute_inverse(b, Pr))
-        x = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, False, False, y)[Pc]
+        x = utils.permute(numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, False, False, y), Pc)
 
         ctx.shape = A_shape
         ctx.save_for_backward(A_data, A_indices, A_indptr,
