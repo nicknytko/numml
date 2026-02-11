@@ -689,7 +689,7 @@ class SparseCSRTensor(object):
 
     def __rmatmul__(self, x):
         # Do this in the slowest way possible computationally
-        return (self.transpose() @ x).T
+        return (self.transpose() @ x.T).T
 
     def __matmul__(self, x):
         dims = None
