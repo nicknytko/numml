@@ -588,7 +588,10 @@ class SparseCSRTensor(object):
                 self.shape = shape
             else:
                 self.shape = arg1.shape
-        elif isinstance(arg1, sci_sp.spmatrix):
+        elif (
+                isinstance(arg1, sci_sp.spmatrix) or
+                isinstance(arg1, sci_sp.sparray)
+             ):
             arg_csr = arg1.tocsr()
             if dtype is None:
                 dtype = numpy_to_torch_dtype(arg_csr.data.dtype)
