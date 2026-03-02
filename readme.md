@@ -11,11 +11,15 @@ A library for PyTorch providing sparse, differentiable CSR support.
 
 Clone normally and install with pip,
 ```
-pip3 install .
+pip3 install . --no-build-isolation
 ```
 
 If CUDA is not detected on your system, this will silently default to compiling only CPU
 implementations: you can run pip with verbose (`-v`) for a sanity check on this.
+
+It is suggested to use `--no-build-isolation` as the build process will default to pulling the
+regular `torch` PyPI package.  This may be incorrect if you have, for example, installed torch
+with support for a specific version of CUDA.
 
 ### Tests
 
