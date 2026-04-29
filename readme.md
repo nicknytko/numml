@@ -32,14 +32,17 @@ Note that the test cases will assume you are running on a machine with CUDA inst
 
 ### Citing
 
-[Optimized Sparse Matrix Operations for Reverse Mode Automatic Differentiation](https://arxiv.org/abs/2212.05159)
+[Optimized Sparse Matrix Operations for Reverse Mode Automatic Differentiation](https://doi.org/10.1137/24M1711832) [(arxiv preprint)](https://arxiv.org/abs/2212.05159)
 ```
-@misc{nytko2023optimized,
-      title={Optimized Sparse Matrix Operations for Reverse Mode Automatic Differentiation}, 
-      author={Nicolas Nytko and Ali Taghibakhshi and Tareq Uz Zaman and Scott MacLachlan and Luke N. Olson and Matt West},
-      year={2023},
-      eprint={2212.05159},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG}
+@misc{nytko2025optimized,
+    author = {Nytko, Nicolas and Taghibakhshi, Ali and Zaman, Tareq Uz and MacLachlan, Scott and Olson, Luke N. and West, Matthew},
+    title = {Optimized Sparse Matrix Operations for Reverse Mode Automatic Differentiation},
+    journal = {SIAM Journal on Scientific Computing},
+    volume = {47},
+    number = {5},
+    pages = {C1115-C1143},
+    year = {2025},
+    doi = {10.1137/24M1711832},
+    URL = {https://doi.org/10.1137/24M1711832}
 }
 ```
