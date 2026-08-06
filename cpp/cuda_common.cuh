@@ -14,6 +14,21 @@ const int threads_per_block = 512;
 #define tensor_acc_3(T, N, type) (T).packed_accessor64<type, N, torch::RestrictPtrTraits>()
 
 /* Helpers */
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 600
+#else
+__device__ double atomicAdd(double* address, double val)
+{
+    unsigned long long int* address_as_ull = (unsigned long long int*)address;
+    unsigned long long int old = *address_as_ull, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_ull, assumed,
+                __double_as_longlong(val + __longlong_as_double(assumed)));
+    } while (assumed != old);
+    return __longlong_as_double(old);
+}
+#endif
+
 
 /** Error handling */
 inline void _cuda_check_err(const cudaError_t err, const char* file, const int line, const char* function) {
