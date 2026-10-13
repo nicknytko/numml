@@ -70,3 +70,25 @@ def test_splu_solve_grad():
         grad_b = utils.grad(splu_helper, b)
         assert(torch.allclose(grad_b, utils.grad(spsolve_helper, b)))
         assert(common.relerr(utils.fd(splu_helper, b), grad_b) < 1e-6)
+
+
+def test_splu_solve_grad_A():
+    N = 6
+    N2 = N * N
+    A = (sp.eye(N2) * 4 - sp.eye(N2, k=1) - sp.eye(N2, k=-1) - sp.eye(N2, k=-N) - sp.eye(N2,k=N)).double()
+
+    it = 5
+    for i in range(it):
+        b = torch.randn(N2, dtype=torch.double)
+        w = torch.randn(N2, dtype=torch.double)
+
+        # Reuse one factorization for several solves
+        def splu_helper(A_in):
+            A_LU = sp.linalg.splu(A_in)
+            return sp.linalg.splu_solve(A_LU, sp.linalg.splu_solve(A_LU, b)) @ w
+        def spsolve_helper(A_in):
+            return sp.linalg.spsolve(A_in, sp.linalg.spsolve(A_in, b)) @ w
+
+        grad_A = utils.grad(splu_helper, A)
+        assert(torch.allclose(grad_A.data, utils.grad(spsolve_helper, A).data))
+        assert(common.relerr(utils.fd(splu_helper, A, h=1e-5), grad_A) < 1e-6)

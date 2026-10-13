@@ -44,57 +44,71 @@ class sptrsv(torch.autograd.Function):
                 grad_b) # b
 
 
+class SparseLU():
+    '''
+    Sparse LU factorization of a matrix returned by `splu()`
+
+    This holds on to the original matrix alongside the factors, so that solves with
+    the factorization can propagate gradient information back to the entries of A.
+    '''
+
+    def __init__(self, A, Pc, Pr, M, Mt):
+        self.A = A
+        self.Pc = Pc
+        self.Pr = Pr
+        self.M = M
+        self.Mt = Mt
+
+    @property
+    def shape(self):
+        return self.A.shape
+
+    def solve(self, b):
+        return splu_solve(self, b)
+
+
 def splu(A):
     '''
     Compute the sparse LU factorization of an invertible matrix (with pivoting).
 
-    Note that this does not propagate gradient information.  If you need a solve with
-    gradients, use spsolve.
-    '''
+    The factorization object is intended to be an opaque handle passed to `splu_solve()`.
+    Gradients will be propagated to the entries of A through any subsequent solves.
 
-    Pc, Pr, M_data, M_indices, M_indptr = numml_torch_cpp.splu(A.shape[0], A.shape[1], A.data, A.indices, A.indptr)[:5]
-    return Pc, Pr, sp.SparseCSRTensor((M_data, M_indices, M_indptr), A.shape)
-
-
-def splu_solve(A_LU, b):
-    '''
-    Given a sparse LU factorization, solve Ax = b.
     Parameters
     ----------
-    A_LU : numml.sparse.SparseCSRTensor
-      The output of splu()
-    b : torch.Tensor
-      Vector right-hand-side
+    A : numml.sparse.SparseCSRTensor
+      Square matrix to factorize
+
     Returns
     -------
-    x : torch.Tensor
-      Solution to the matrix equation.
+    A_LU : SparseLU
+      Factorization of A
     '''
 
-    if isinstance(A_LU, tuple):
-        Pc, Pr, A_LU = A_LU
-        y = spsolve_triangular(A_LU, utils.permute_inverse(b, Pr), True, True)
-        return utils.permute(spsolve_triangular(A_LU, y, False, False), Pc)
-    else:
-        y = spsolve_triangular(A_LU, b, True, True)
-        return spsolve_triangular(A_LU, y, False, False)
+    Pc, Pr, M_data, M_indices, M_indptr, Mt_data, Mt_indices, Mt_indptr = \
+        numml_torch_cpp.splu(A.shape[0], A.shape[1], A.data, A.indices, A.indptr)
+
+    return SparseLU(A, Pc, Pr,
+                    sp.SparseCSRTensor((M_data, M_indices, M_indptr), A.shape),
+                    sp.SparseCSRTensor((Mt_data, Mt_indices, Mt_indptr), A.shape))
 
 
-class spsolve_fn(torch.autograd.Function):
+class splu_solve_fn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, A_shape, A_data, A_indices, A_indptr, b):
-        Pc, Pr, M_data, M_indices, M_indptr, Mt_data, Mt_indices, Mt_indptr = \
-            numml_torch_cpp.splu(A_shape[0], A_shape[1], A_data, A_indices, A_indptr)
+    def forward(ctx, A_shape, A_data, A_indices, A_indptr, Pc, Pr,
+                M_data, M_indices, M_indptr, Mt_data, Mt_indices, Mt_indptr, b):
+        if A_data.type() != b.type():
+            raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {b.type()}, respectively.')
 
-        y = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, True, True, utils.permute_inverse(b, Pr))
-        x = utils.permute(numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, False, False, y), Pc)
+        y = numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, True, True,
+                                           numml_torch_cpp.permute_inverse(b, Pr))
+        x = numml_torch_cpp.permute(numml_torch_cpp.sptrsv_forward(A_shape[0], A_shape[1], M_data, M_indices, M_indptr, False, False, y), Pc)
 
         ctx.shape = A_shape
         ctx.save_for_backward(A_data, A_indices, A_indptr,
                               Mt_data, Mt_indices, Mt_indptr, x, Pr, Pc)
 
         return x
-
 
     @staticmethod
     def backward(ctx, grad_x):
@@ -111,11 +125,57 @@ class spsolve_fn(torch.autograd.Function):
                 grad_A_data, # A_data
                 None, # A_indices
                 None, # A_indptr
+                None, # Pc
+                None, # Pr
+                None, # M_data
+                None, # M_indices
+                None, # M_indptr
+                None, # Mt_data
+                None, # Mt_indices
+                None, # Mt_indptr
                 grad_b) # b
 
 
+def splu_solve(A_LU, b):
+    '''
+    Given a sparse LU factorization, solve Ax = b.
+
+    Parameters
+    ----------
+    A_LU : SparseLU
+      The output of splu()
+    b : torch.Tensor
+      Vector right-hand-side
+
+    Returns
+    -------
+    x : torch.Tensor
+      Solution to the matrix equation.
+    '''
+
+    A, M, Mt = A_LU.A, A_LU.M, A_LU.Mt
+    return splu_solve_fn.apply(A.shape, A.data, A.indices, A.indptr, A_LU.Pc, A_LU.Pr,
+                               M.data, M.indices, M.indptr, Mt.data, Mt.indices, Mt.indptr, b)
+
+
 def spsolve(A, b):
-    return spsolve_fn.apply(A.shape, A.data, A.indices, A.indptr, b)
+    '''
+    Solve the equation $Ax = b$ for x using a sparse LU factorization.
+
+    Parameters
+    ----------
+    A : (M, M) sparse CSR matrix
+      Square matrix to solve.
+    b : torch.tensor of shape (M,)
+      Right-hand-side vector
+
+    Returns
+    -------
+    x : torch.tensor of shape (M,)
+      Solution to the matrix equation.
+    '''
+
+    return splu_solve(splu(A), b)
 
 
 def spsolve_triangular(A, b, lower=True, unit_diagonal=False):
