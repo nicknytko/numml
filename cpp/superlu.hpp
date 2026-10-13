@@ -295,6 +295,8 @@ std::vector<torch::Tensor> superlu_factorize(SuperLUMatrix<T>& A) {
     std::vector<coo_coordinate_t<T>> out_coo_format;
     out_coo_format.reserve(Lstore->nzval_colptr[cols]);
 
+    /* Entries smaller than this are dropped, except for on the diagonal: the pivots
+     * always need to be present for the triangular solves, no matter how small. */
     const T eps = T(1e-16);
 
     /* What in the world is SuperLU doing here ????
@@ -312,7 +314,7 @@ std::vector<torch::Tensor> superlu_factorize(SuperLUMatrix<T>& A) {
             for (int64_t idx = Ustore->colptr[col]; idx < Ustore->colptr[col + 1]; ++idx) {
                 const int64_t row = Ustore->rowind[idx];
                 const T val = static_cast<T*>(Ustore->nzval)[idx];
-                if (std::abs(val) > eps) {
+                if (row == col || std::abs(val) > eps) {
                     out_coo_format.push_back({ row, col, val });
                 }
             }
@@ -322,7 +324,7 @@ std::vector<torch::Tensor> superlu_factorize(SuperLUMatrix<T>& A) {
             for (int64_t idx = idx_start; idx < idx_end; ++idx) {
                 const int64_t row = Lstore->rowind[idx];
                 const T val = src[idx - idx_start];
-                if (std::abs(val) > eps) {
+                if (row == col || std::abs(val) > eps) {
                     out_coo_format.push_back({ row, col, val });
                 }
             }
@@ -330,6 +332,14 @@ std::vector<torch::Tensor> superlu_factorize(SuperLUMatrix<T>& A) {
     }
 
     /** Convert to CSC representation */
+    /* NOTE: out_coo_format is not sorted, so the row indices within each column of the
+     * output are not in ascending order.  The triangular solves only need each column to
+     * be laid out as (rows < col), diagonal, (rows > col), which is what falls out of the
+     * supernodal storage above: U entries from earlier supernodes, then the supernode's
+     * diagonal block in order, then the rows below it.  If anything ever needs properly
+     * sorted indices (or the extraction above changes), add a
+     *   std::sort(out_coo_format.begin(), out_coo_format.end());
+     * here. */
     auto int_tens_opts = torch::TensorOptions()
         .dtype(torch::kInt64);
 
