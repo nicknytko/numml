@@ -546,6 +546,124 @@ def repack_csr(A_data, A_indices, A_indptr, A_shape):
     return SparseCSRTensor((A_data, A_indices, A_indptr), A_shape, clone=False)
 
 
+def _normalize_index(idx, n, device):
+    '''
+    Converts a single-axis index into a flat tensor of nonnegative entries.
+
+    Parameters
+    ----------
+    idx : int, slice, range, list, np.ndarray, or torch.Tensor
+      Index along one axis.  Tensors/arrays may be integer-valued or a boolean mask.
+    n : int
+      Length of the axis being indexed
+    device : torch.device
+      Device to place the output on
+
+    Returns
+    -------
+    index : torch.Tensor or None
+      Long tensor of indices in [0, n), or None if the full axis is selected.
+    is_scalar : bool
+      If the index was a single integer
+    '''
+
+    if idx is None or idx is Ellipsis:
+        raise IndexError('None and Ellipsis are not supported for sparse tensor indexing.')
+
+    if isinstance(idx, slice):
+        if idx == slice(None):
+            return None, False
+        return torch.arange(*idx.indices(n), device=device), False
+
+    if isinstance(idx, range):
+        idx = torch.arange(idx.start, idx.stop, idx.step)
+
+    is_scalar = False
+    if isinstance(idx, (bool, np.bool_)):
+        raise IndexError('Boolean scalars are not supported for sparse tensor indexing.')
+    elif isinstance(idx, (int, np.integer)):
+        is_scalar = True
+        idx = torch.tensor([int(idx)])
+    else:
+        idx = torch.as_tensor(idx)
+        if idx.ndim == 0 and idx.dtype != torch.bool:
+            is_scalar = True
+            idx = idx.reshape(1)
+
+    idx = idx.to(device)
+    if idx.ndim != 1:
+        raise IndexError(f'Sparse tensor indices must be one-dimensional along each axis, got {idx.ndim} dimensions.')
+
+    if idx.dtype == torch.bool:
+        if len(idx) != n:
+            raise IndexError(f'Boolean mask of length {len(idx)} does not match axis of length {n}.')
+        return torch.nonzero(idx).flatten(), False
+
+    if len(idx) == 0:
+        return torch.empty(0, dtype=torch.long, device=device), False
+    if idx.is_floating_point() or idx.is_complex():
+        raise IndexError(f'Sparse tensor indices must be integers or booleans, got {idx.dtype}.')
+
+    idx = idx.long()
+    idx = torch.where(idx < 0, idx + n, idx)
+    if torch.any((idx < 0) | (idx >= n)):
+        raise IndexError(f'Index out of bounds for axis of length {n}.')
+
+    return idx, is_scalar
+
+
+def _csr_select_rows(A_data, A_indices, A_indptr, rows):
+    '''
+    Extracts the given rows (in order, with repetition) from a CSR matrix.
+    '''
+
+    counts = A_indptr[rows + 1] - A_indptr[rows]
+    indptr = torch.cat((torch.zeros(1, dtype=torch.long, device=rows.device), torch.cumsum(counts, 0)))
+
+    # Index into A of each output entry
+    src = (torch.repeat_interleave(A_indptr[rows] - indptr[:-1], counts) +
+           torch.arange(indptr[-1].item(), device=rows.device))
+
+    return A_data[src], A_indices[src], indptr
+
+
+def _csr_select_cols(A_data, A_indices, A_indptr, A_cols, cols):
+    '''
+    Extracts the given columns (in order, with repetition) from a CSR matrix.
+    '''
+
+    device = cols.device
+    rows = len(A_indptr) - 1
+    nnz = len(A_indices)
+
+    # Entries of cols_sorted in [offset[j], offset[j] + count[j]) are requests for
+    # column j of A, which get placed in columns cols_perm[...] of the output.
+    _, cols_perm = torch.sort(cols, stable=True)
+    count = torch.bincount(cols, minlength=A_cols)
+    offset = torch.cumsum(count, 0) - count
+
+    # Each entry of A is repeated as many times as its column is requested
+    row_ind = torch.repeat_interleave(torch.arange(rows, device=device), A_indptr[1:] - A_indptr[:-1])
+    rep = count[A_indices]
+    src = torch.repeat_interleave(torch.arange(nnz, device=device), rep)
+    k = torch.arange(len(src), device=device) - torch.repeat_interleave(torch.cumsum(rep, 0) - rep, rep)
+
+    out_cols = cols_perm[offset[A_indices[src]] + k]
+    out_rows = row_ind[src]
+
+    if len(cols) > 1 and not torch.all(cols[1:] > cols[:-1]):
+        # Columns were permuted or repeated, so need to re-sort each row
+        order = torch.argsort(out_rows * len(cols) + out_cols)
+        src = src[order]
+        out_cols = out_cols[order]
+        out_rows = out_rows[order]
+
+    nnz_per_row = torch.bincount(out_rows, minlength=rows)
+    indptr = torch.cat((torch.zeros(1, dtype=torch.long, device=device), torch.cumsum(nnz_per_row, 0)))
+
+    return A_data[src], out_cols, indptr
+
+
 class SparseCSRTensor(object):
     def __init__(self, arg1, shape=None, clone=True, dtype=None, device=None):
         '''
@@ -651,6 +769,53 @@ class SparseCSRTensor(object):
                 self.shape = shape
         else:
             raise RuntimeError(f'Unknown type given as argument of SparseCSRTensor: {type(arg1)}')
+
+    def __getitem__(self, key):
+        '''
+        Extract a submatrix by row and/or column, like A[rows, cols].
+
+        Each of rows and cols may be an integer, a slice, a list/array/tensor of
+        integer indices, or a boolean mask.  Index arrays may be unsorted and may contain
+        duplicates.  Gradients are propagated to the nonzero entries.
+
+        Note that unlike NumPy/SciPy, indexing with two arrays selects the submatrix
+        formed by the given rows and columns, rather than the individual entries
+        (rows[0], cols[0]), (rows[1], cols[1]), ...
+
+        Returns
+        -------
+        sub : SparseCSRTensor or torch.Tensor
+          The (len(rows), len(cols)) submatrix.  If both rows and cols are integers, then
+          the single entry is returned as a scalar-valued Torch tensor.
+        '''
+
+        if not isinstance(key, tuple):
+            key = (key,)
+        if len(key) == 1:
+            key = (key[0], slice(None))
+        elif len(key) != 2:
+            raise IndexError(f'Sparse tensor takes at most 2 indices, got {len(key)}.')
+
+        rows, row_scalar = _normalize_index(key[0], self.shape[0], self.device)
+        cols, col_scalar = _normalize_index(key[1], self.shape[1], self.device)
+
+        if rows is None and cols is None:
+            return self.clone()
+
+        data, indices, indptr = self.data, self.indices, self.indptr
+        shape = (self.shape[0], self.shape[1])
+
+        if rows is not None:
+            data, indices, indptr = _csr_select_rows(data, indices, indptr, rows)
+            shape = (len(rows), shape[1])
+        if cols is not None:
+            data, indices, indptr = _csr_select_cols(data, indices, indptr, shape[1], cols)
+            shape = (shape[0], len(cols))
+
+        if row_scalar and col_scalar:
+            return data.sum()
+
+        return SparseCSRTensor((data, indices, indptr), shape, clone=False)
 
     def spmv(self, x):
         if self.shape[1] != torch.numel(x):
