@@ -1565,7 +1565,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
     torch::Tensor xp = torch::empty_like(x);
 
-    AT_DISPATCH_FLOATING_TYPES(x.type(), "permute_cuda", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(x.scalar_type(), "permute_cuda", ([&] {
         cuda_kernel_tensor_permute<<<
             (x.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
                 x.size(0), tensor_acc(x, scalar_t), tensor_acc(xp, scalar_t), tensor_acc(P, int64_t), true);
@@ -1580,7 +1580,7 @@ FUNC_IMPL_CUDA(torch::Tensor,
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
     torch::Tensor xp = torch::empty_like(x);
 
-    AT_DISPATCH_FLOATING_TYPES(x.type(), "permute_inverse_cuda", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(x.scalar_type(), "permute_inverse_cuda", ([&] {
         cuda_kernel_tensor_permute<<<
             (x.size(0) + threads_per_block - 1) / threads_per_block, threads_per_block, 0, main_stream>>>(
                 x.size(0), tensor_acc(x, scalar_t), tensor_acc(xp, scalar_t), tensor_acc(P, int64_t), false);
