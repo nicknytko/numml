@@ -17,7 +17,11 @@ class sptrsv(torch.autograd.Function):
         if A_data.type() != b.type():
             raise RuntimeError(f'Matrix and vector should be same data type, got {A_data.type()} and {b.type()}, respectively.')
 
-        x = numml_torch_cpp.sptrsv_forward(shape[0], shape[1], A_data, A_indices, A_indptr, lower, unit, b)
+        if shape[0] == 0:
+            # Nothing to solve, and the native kernels cannot be launched on an empty system
+            x = torch.zeros_like(b)
+        else:
+            x = numml_torch_cpp.sptrsv_forward(shape[0], shape[1], A_data, A_indices, A_indptr, lower, unit, b)
         ctx.save_for_backward(A_data, A_indices, A_indptr, b, x)
         ctx.lower = lower
         ctx.unit = unit
@@ -32,8 +36,11 @@ class sptrsv(torch.autograd.Function):
         unit = ctx.unit
         shape = ctx.shape
 
-        grad_A_data, grad_b = numml_torch_cpp.sptrsv_backward(grad_x, x, shape[0], shape[1],
-                                                              A_data, A_indices, A_indptr, lower, unit, b)
+        if shape[0] == 0:
+            grad_A_data, grad_b = torch.zeros_like(A_data), torch.zeros_like(b)
+        else:
+            grad_A_data, grad_b = numml_torch_cpp.sptrsv_backward(grad_x, x, shape[0], shape[1],
+                                                                  A_data, A_indices, A_indptr, lower, unit, b)
 
         return (None, # shape
                 grad_A_data, # A_data

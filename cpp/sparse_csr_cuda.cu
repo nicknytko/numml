@@ -1337,6 +1337,11 @@ FUNC_IMPL_CUDA(torch::Tensor,
         .device(A_data.device().type(), A_data.device().index());
 
     torch::Tensor A_d = torch::zeros({A_rows, A_cols}, scalar_tens_opts);
+    if (A_rows == 0) {
+        /* Launching a kernel with zero blocks is an error */
+        return A_d;
+    }
+
     AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_to_dense_forward_cuda", ([&] {
         kernel_csr_to_dense_forward<<<
             (A_rows + threads_per_block - 1) / threads_per_block,
@@ -1375,6 +1380,9 @@ FUNC_IMPL_CUDA(torch::Tensor,
 
     at::cuda::CUDAStream main_stream = at::cuda::getCurrentCUDAStream();
     torch::Tensor grad_A_data = torch::empty_like(A_data);
+    if (A_rows == 0) {
+        return grad_A_data;
+    }
 
     AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "csr_to_dense_backward_cuda", ([&] {
         kernel_csr_to_dense_backward<<<
