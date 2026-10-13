@@ -588,7 +588,10 @@ class SparseCSRTensor(object):
                 self.shape = shape
             else:
                 self.shape = arg1.shape
-        elif isinstance(arg1, sci_sp.spmatrix):
+        elif (
+                isinstance(arg1, sci_sp.spmatrix) or
+                isinstance(arg1, sci_sp.sparray)
+             ):
             arg_csr = arg1.tocsr()
             if dtype is None:
                 dtype = numpy_to_torch_dtype(arg_csr.data.dtype)
@@ -687,6 +690,10 @@ class SparseCSRTensor(object):
     def spdmm(self, othr):
         return spdmm.apply(self.shape, self.data, self.indices, self.indptr, othr)
 
+    def __rmatmul__(self, x):
+        # Do this in the slowest way possible computationally
+        return (self.transpose() @ x.T).T
+
     def __matmul__(self, x):
         dims = None
         if isinstance(x, torch.Tensor):
@@ -728,7 +735,8 @@ class SparseCSRTensor(object):
                 y_fl = self.spdmm(x_fl)
 
                 # Reshape and transpose back to correct shape
-                y_tr = y_fl.reshape(x_tr.shape)
+                new_shape = (self.shape[0],) + tuple(x_tr.shape[1:])
+                y_tr = y_fl.reshape(new_shape)
                 return torch.transpose(y_tr, 0, ndim-2)
             elif torch.any(torch.tensor(x.shape) == 1):
                 # If the shapes don't line up for batch multiplication, try to squeeze and try again.
