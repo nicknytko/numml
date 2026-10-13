@@ -1278,7 +1278,10 @@ FUNC_IMPL_CUDA(std::vector<torch::Tensor>,
 
     /* Transpose back into CSR format */
     auto As_f = csr_transpose_forward_cuda(A_cols, A_rows, AsT_data, AsT_indices, AsT_indptr);
-    return {As_f[0], As_f[1], As_f[2], AsT_data, AsT_indices, AsT_indptr};
+
+    /* No pivoting is done, so return identity row and column permutations */
+    torch::Tensor P = torch::arange(A_rows, int_tens_opts);
+    return {P, P, As_f[0], As_f[1], As_f[2], AsT_data, AsT_indices, AsT_indptr};
 }
 
 FUNC_IMPL_CUDA(std::vector<torch::Tensor>,

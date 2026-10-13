@@ -805,10 +805,6 @@ FUNC_IMPL_CPU(std::vector<torch::Tensor>,
     torch::Tensor grad_b_y = sptrsv_forward_cpu(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, true, false, permute_inverse_cpu(grad_x, Pc));
     torch::Tensor grad_b = permute_cpu(sptrsv_forward_cpu(A_rows, A_cols, Mt_data, Mt_indices, Mt_indptr, false, true, grad_b_y), Pr);
 
-    std::cerr << permute_cpu(grad_x, Pc) << std::endl;
-    std::cerr << grad_b_y << std::endl;
-    std::cerr << grad_b << std::endl;
-
     /* grad_A = (-grad_b x^T) (*) mask(A) */
     torch::Tensor grad_A_data = torch::empty_like(A_data);
     AT_DISPATCH_FLOATING_TYPES(A_data.scalar_type(), "spsolve_backward_cpu", ([&] {

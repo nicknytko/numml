@@ -166,8 +166,55 @@ def unsqueeze_like(x, y):
         x = torch.unsqueeze(x, dim)
     return x
 
+class _permute_fn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, P, inverse):
+        ctx.save_for_backward(P)
+        ctx.inverse = inverse
+
+        if inverse:
+            return numml_torch_cpp.permute_inverse(x, P)
+        else:
+            return numml_torch_cpp.permute(x, P)
+
+    @staticmethod
+    def backward(ctx, grad_xp):
+        (P,) = ctx.saved_tensors
+
+        # The permutation is orthogonal, so the adjoint is the opposite permutation
+        if ctx.inverse:
+            grad_x = numml_torch_cpp.permute(grad_xp, P)
+        else:
+            grad_x = numml_torch_cpp.permute_inverse(grad_xp, P)
+
+        return (grad_x, # x
+                None, # P
+                None) # inverse
+
 def permute(x, P):
-    return numml_torch_cpp.permute(x, P)
+    '''
+    Permutes the entries of a vector, such that out[i] = x[P[i]].
+
+    Parameters
+    ----------
+    x : torch.Tensor
+      Vector to permute
+    P : torch.Tensor
+      Integer permutation vector
+    '''
+
+    return _permute_fn.apply(x, P, False)
 
 def permute_inverse(x, P):
-    return numml_torch_cpp.permute_inverse(x, P)
+    '''
+    Applies the inverse permutation to a vector, such that out[P[i]] = x[i].
+
+    Parameters
+    ----------
+    x : torch.Tensor
+      Vector to permute
+    P : torch.Tensor
+      Integer permutation vector
+    '''
+
+    return _permute_fn.apply(x, P, True)
